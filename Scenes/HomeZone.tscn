@@ -1,0 +1,16 @@
+[gd_scene format=3 uid="uid://chmtc4ixbowlw"]
+
+[ext_resource type="Script" uid="uid://bay6wmg7aktix" path="res://Scripts/HomeZone.gd" id="1"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_hz"]
+size = Vector2(200, 200)
+
+[node name="HomeZone" type="Area2D" unique_id=88992544]
+script = ExtResource("1")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=434808761]
+shape = SubResource("RectangleShape2D_hz")
+
+[node name="Visual" type="Polygon2D" parent="." unique_id=138502994]
+color = Color(0.2, 0.5, 1, 0.35)
+polygon = PackedVector2Array(-100, -100, 100, -100, 100, 100, -100, 100)

@@ -1,0 +1,745 @@
+extends Node
+class_name NetworkManager
+
+var _peer: ENetMultiplayerPeer
+
+var flag_instances: Dictionary = {}   # flag_team_id -> Node2D (null if carried)
+var flags_at_home: Dictionary = {}    # flag_team_id -> bool
+var scores: Dictionary = {}           # team_id -> int
+var team_counts: Dictionary = {}      # team_id -> int  (populated from teams.json)
+var peer_teams: Dictionary = {}
+## Maps team_id -> slot index (0 or 1). Assigned at game start from level.json slots.
+var team_slot_map: Dictionary = {}
+
+var is_game_active: bool = false
+var game_timer: float = 180.0
+
+var server_address: String = "127.0.0.1"
+var server_port: int = 7777
+var is_host: bool = false
+var max_peers: int = 4
+
+var max_players: int = 2
+var max_per_team: int = 1
+
+signal flag_spawned
+signal flag_picked_up
+signal flag_scored
+signal game_over
+signal all_players_joined
+signal team_data_updated(counts: Dictionary, your_team: int)
+signal game_started
+signal game_mode_updated
+signal discovery_status(message: String)
+
+const DISCOVERY_PORT: int = 7778
+const DISCOVERY_MSG: String = "DISCOVER_DIST"
+const DISCOVERY_RESPONSE: String = "DIST_SERVER"
+const DISCOVERY_INTERVAL: float = 1.0
+const DISCOVERY_TIMEOUT: float = 10.0
+
+var _discovery_udp: PacketPeerUDP = null
+var _discovering: bool = false
+var _discovery_timer: float = 0.0
+var _discovery_elapsed: float = 0.0
+
+var _initialized: bool = false
+var player_scene = preload("res://Scenes/Player.tscn")
+var npc_scene = preload("res://Scenes/NPC.tscn")
+var chest_scene = preload("res://Scenes/Chest.tscn")
+var team_config: Dictionary = {}
+
+## Team assigned to slot 0 (the "attacker" — must capture the prize).
+## Set in _start_game() once team_slot_map is known.
+var attacker_team_id: int = -1
+## All active NPC nodes, keyed by their unique string name.
+var npc_nodes: Dictionary = {}
+## The prize chest node (exists only on server after game start).
+var chest_node: Node = null
+
+@onready var players: Node2D = $"../Players"
+@onready var team_manager = $"../TeamManager"
+#@onready var level_builder = $"../LevelBuilder"
+var level_builder = null
+func _ready():
+	if _initialized:
+		print("WARNING: _ready() called twice, skipping.")
+		return
+	_initialized = true
+	_load_team_config()
+	_init_team_data()
+
+	# Debug: print full tree to find level_builder
+	print("NetworkManager parent: ", get_parent().name)
+	print("level_builder onready: ", level_builder)
+	for child in get_parent().get_children():
+		print("  sibling: ", child.name, " (", child.get_class(), ")")
+		for grandchild in child.get_children():
+			print("    child: ", grandchild.name, " script: ", grandchild.get_script())
+
+	var args := OS.get_cmdline_args()
+
+	if "--1v1" in args:
+		max_players = 2
+		max_per_team = 1
+		print("Game mode: 1v1")
+
+	if "--server" in args:
+		print("Initializing as SERVER...")
+		is_host = true
+		_peer = ENetMultiplayerPeer.new()
+		var error: Error = _peer.create_server(server_port, max_peers)
+		if error != OK:
+			printerr("Server creation failed: ", error)
+			return
+		multiplayer.multiplayer_peer = _peer
+		_peer.peer_connected.connect(_on_peer_connected)
+		_peer.peer_disconnected.connect(_on_peer_disconnected)
+		_start_discovery_listener()
+		print("Host ready. Max peers: ", max_peers)
+
+	elif "--client" in args:
+		var addr_index := args.find("--address")
+		if addr_index != -1 and addr_index + 1 < args.size():
+			# Address provided explicitly — connect immediately
+			server_address = args[addr_index + 1]
+			_connect_to_server(server_address)
+		else:
+			# No address — discover server on local network
+			_start_discovery_broadcast()
+	else:
+		printerr("No --server or --client argument provided.")
+
+func _process(delta: float) -> void:
+	_process_discovery(delta)
+	if not is_game_active:
+		return
+	if not multiplayer.is_server():
+		return
+	game_timer -= delta
+	if game_timer <= 0:
+		_end_game()
+
+# --- LAN Discovery ---
+
+func _start_discovery_listener() -> void:
+	_discovery_udp = PacketPeerUDP.new()
+	var err := _discovery_udp.bind(DISCOVERY_PORT)
+	if err != OK:
+		printerr("Discovery listener failed to bind port ", DISCOVERY_PORT, ": ", err)
+		_discovery_udp = null
+		return
+	print("Discovery listener active on port ", DISCOVERY_PORT)
+
+func _start_discovery_broadcast() -> void:
+	_discovery_udp = PacketPeerUDP.new()
+	_discovery_udp.set_broadcast_enabled(true)
+	# Bind to a reply port so the server knows where to send the response
+	var err := _discovery_udp.bind(DISCOVERY_PORT + 1)
+	if err != OK:
+		printerr("Discovery broadcast socket failed: ", err, " — falling back to localhost")
+		_discovery_udp = null
+		_connect_to_server("127.0.0.1")
+		return
+	_discovering = true
+	_discovery_elapsed = 0.0
+	_discovery_timer = DISCOVERY_INTERVAL  # fire immediately on first frame
+	emit_signal("discovery_status", "Searching for server on local network...")
+	print("LAN discovery started")
+
+func _connect_to_server(address: String) -> void:
+	server_address = address
+	_peer = ENetMultiplayerPeer.new()
+	var error: Error = _peer.create_client(server_address, server_port)
+	if error != OK:
+		printerr("Client connection failed: ", error)
+		return
+	multiplayer.multiplayer_peer = _peer
+	multiplayer.connected_to_server.connect(_on_connected_to_server)
+	print("Connecting to ", server_address, ":", server_port)
+
+func _process_discovery(delta: float) -> void:
+	if _discovery_udp == null:
+		return
+
+	if is_host:
+		# Server: respond to any discovery broadcast
+		while _discovery_udp.get_available_packet_count() > 0:
+			var packet := _discovery_udp.get_packet()
+			if packet.get_string_from_utf8() == DISCOVERY_MSG:
+				var client_ip := _discovery_udp.get_packet_ip()
+				var client_port := _discovery_udp.get_packet_port()
+				print("Discovery request from ", client_ip, " — responding")
+				_discovery_udp.set_dest_address(client_ip, client_port)
+				_discovery_udp.put_packet(DISCOVERY_RESPONSE.to_utf8_buffer())
+	else:
+		# Client: broadcast until server responds or timeout
+		if not _discovering:
+			return
+		_discovery_elapsed += delta
+		_discovery_timer += delta
+
+		if _discovery_timer >= DISCOVERY_INTERVAL:
+			_discovery_timer = 0.0
+			_discovery_udp.set_dest_address("255.255.255.255", DISCOVERY_PORT)
+			_discovery_udp.put_packet(DISCOVERY_MSG.to_utf8_buffer())
+			print("Broadcasting discovery... (%.0fs)" % _discovery_elapsed)
+
+		while _discovery_udp.get_available_packet_count() > 0:
+			var packet := _discovery_udp.get_packet()
+			if packet.get_string_from_utf8() == DISCOVERY_RESPONSE:
+				var found_ip := _discovery_udp.get_packet_ip()
+				print("Server found at ", found_ip)
+				_discovering = false
+				_discovery_udp.close()
+				_discovery_udp = null
+				emit_signal("discovery_status", "Found server at " + found_ip)
+				_connect_to_server(found_ip)
+				return
+
+		if _discovery_elapsed >= DISCOVERY_TIMEOUT:
+			print("Discovery timed out — falling back to 127.0.0.1")
+			_discovering = false
+			_discovery_udp.close()
+			_discovery_udp = null
+			emit_signal("discovery_status", "No server found. Trying localhost...")
+			_connect_to_server("127.0.0.1")
+
+func _get_level_builder():
+	if level_builder == null:
+		# Walk the whole tree looking for LevelBuilderClaude
+		level_builder = _find_node_by_script(get_parent(), "LevelBuilderClaude")
+		if level_builder == null:
+			printerr("LevelBuilderClaude not found anywhere!")
+	return level_builder
+
+func _find_node_by_script(node: Node, class_name_str: String) -> Node:
+	if node.get_script() and node.get_script().get_global_name() == class_name_str:
+		return node
+	for child in node.get_children():
+		var result = _find_node_by_script(child, class_name_str)
+		if result:
+			return result
+	return null
+
+
+# --- Team Config ---
+
+func _load_team_config() -> void:
+	var file := FileAccess.open("res://JSON/teams.json", FileAccess.READ)
+	if file == null:
+		printerr("teams.json not found — using default visuals")
+		return
+	var json := JSON.new()
+	var err := json.parse(file.get_as_text())
+	file.close()
+	if err != OK:
+		printerr("teams.json parse error: ", json.get_error_message())
+		return
+	team_config = json.data
+	print("Loaded teams.json: ", team_config.get("teams", []).size(), " teams")
+
+## Populate team_counts, flags_at_home, and scores from the loaded config.
+func _init_team_data() -> void:
+	team_counts.clear()
+	flags_at_home.clear()
+	scores.clear()
+	for t in team_config.get("teams", []):
+		var tid: int = t.get("team_id", -1)
+		if tid == -1:
+			continue
+		team_counts[tid] = 0
+		flags_at_home[tid] = true
+		scores[tid] = 0
+	# Fallback: keep working if teams.json is missing
+	if team_counts.is_empty():
+		team_counts = {1: 0, 2: 0}
+		flags_at_home = {1: true, 2: true}
+		scores = {1: 0, 2: 0}
+
+## Returns the config dictionary for team_id, or {} if not found.
+func _get_team_config(team_id: int) -> Dictionary:
+	for t in team_config.get("teams", []):
+		if t.get("team_id", -1) == team_id:
+			return t
+	return {}
+
+## Assigns the 2 active teams to level slots (sorted team_id order → slot 0, slot 1).
+## Must be called after all teams have joined, before _start_game.
+func _assign_team_slots() -> void:
+	team_slot_map.clear()
+	var active: Array = []
+	for tid in team_counts:
+		if team_counts[tid] > 0:
+			active.append(tid)
+	active.sort()
+	for i in active.size():
+		team_slot_map[active[i]] = i
+	print("Team slot assignments: ", team_slot_map)
+
+## Returns the level slot config Dictionary for the given team_id, or {}.
+func _get_slot_config(team_id: int) -> Dictionary:
+	var lb = _get_level_builder()
+	if lb == null:
+		return {}
+	var slot_idx: int = team_slot_map.get(team_id, -1)
+	if slot_idx < 0 or slot_idx >= lb.slot_configs.size():
+		return {}
+	return lb.slot_configs[slot_idx]
+
+## Returns 0 for the first peer on a team, 1 for the second (by sorted peer ID).
+func _get_slot_in_team(peer_id: int, team_id: int) -> int:
+	var team_peers: Array = []
+	for pid in peer_teams:
+		if peer_teams[pid] == team_id:
+			team_peers.append(pid)
+	team_peers.sort()
+	var idx := team_peers.find(peer_id)
+	return max(idx, 0)
+
+func _apply_player_skin(player: Node, peer_id: int) -> void:
+	var team_id: int = peer_teams.get(peer_id, -1)
+	if team_id == -1:
+		return
+	var config := _get_team_config(team_id)
+	if config.is_empty():
+		return
+	var slot := _get_slot_in_team(peer_id, team_id)
+	var sprite_key := "player1_sprite" if slot == 0 else "player2_sprite"
+	var weapon_key := "player1_weapon" if slot == 0 else "player2_weapon"
+	var c_arr = config.get("color", null)
+	var team_color := Color(c_arr[0], c_arr[1], c_arr[2]) if c_arr != null else Color.WHITE
+	player.apply_team_skin(
+		"res://" + config.get(sprite_key, ""),
+		"res://" + config.get(weapon_key, ""),
+		team_color
+	)
+
+func _on_connected_to_server() -> void:
+	multiplayer.connected_to_server.disconnect(_on_connected_to_server)
+	print("Connected! My ID: ", multiplayer.get_unique_id())
+
+func _on_peer_connected(id: int) -> void:
+	print("Peer connected: ", id)
+	for child in players.get_children():
+		var existing_id := int(child.name)
+		if existing_id != id:
+			spawn_remote_player.rpc_id(id, existing_id, child.position)
+	rpc_update_team_counts.rpc_id(id, team_counts, -1, -1)
+	rpc_set_game_mode.rpc_id(id, max_players, max_per_team)
+
+func _on_peer_disconnected(id: int) -> void:
+	print("Peer disconnected: ", id)
+	if players.has_node(str(id)):
+		players.get_node(str(id)).queue_free()
+	if id in peer_teams:
+		team_counts[peer_teams[id]] -= 1
+		peer_teams.erase(id)
+		rpc_update_team_counts.rpc(team_counts, -1, -1)
+
+
+# --- Spawning ---
+
+func _get_spawn_position(team_id: int, peer_id: int = -1) -> Vector2:
+	var lb = _get_level_builder()
+	if lb == null:
+		var slot_idx: int = team_slot_map.get(team_id, 0)
+		return Vector2(300, 300) if slot_idx == 0 else Vector2(3800, 3800)
+	var slot_idx: int = team_slot_map.get(team_id, 0)
+	var spawns: Array = lb.slot_spawns[slot_idx] if lb.slot_spawns.size() > slot_idx else []
+	if spawns.is_empty():
+		return Vector2(300, 300) if team_id == 1 else Vector2(3800, 3800)
+
+	# Use sorted peer-ID order so the index is deterministic even when all
+	# players spawn at the same time (before any node enters the tree).
+	var idx := 0
+	if peer_id != -1:
+		var team_peers: Array = []
+		for pid in peer_teams:
+			if peer_teams[pid] == team_id:
+				team_peers.append(pid)
+		team_peers.sort()
+		var pos_in_list := team_peers.find(peer_id)
+		idx = pos_in_list if pos_in_list != -1 else 0
+
+	var base_pos: Vector2 = spawns[idx % spawns.size()]
+	return _find_free_spawn_near(base_pos, lb)
+
+# Search outward from base_pos for a floor tile that no existing player occupies.
+func _find_free_spawn_near(base_pos: Vector2, lb: Node) -> Vector2:
+	var tile_map = lb.tile_map
+	if tile_map == null:
+		return base_pos
+
+	# Build candidate offsets: centre first, then expanding rings (shuffled per
+	# ring so the fallback direction is random rather than always top-left).
+	var candidates: Array[Vector2] = [Vector2.ZERO]
+	for ring in range(1, 8):  # search up to 7 tiles (224 px) out
+		var ring_offsets: Array[Vector2] = []
+		for dx in range(-ring, ring + 1):
+			for dy in range(-ring, ring + 1):
+				if abs(dx) == ring or abs(dy) == ring:
+					ring_offsets.append(Vector2(dx * 32, dy * 32))
+		ring_offsets.shuffle()
+		candidates.append_array(ring_offsets)
+
+	for offset in candidates:
+		var candidate := base_pos + offset
+		if _is_valid_spawn(candidate, tile_map):
+			return candidate
+
+	return base_pos  # give up and use original
+
+func _is_valid_spawn(pos: Vector2, tile_map) -> bool:
+	# Every tile the player's bounding box overlaps must be a floor tile.
+	var half := 28  # slightly smaller than half of the 64 px player hitbox
+	for cx in [-half, half]:
+		for cy in [-half, half]:
+			var tile := Vector2i(int(pos.x + cx) / 32, int(pos.y + cy) / 32)
+			if tile_map.get_cell_atlas_coords(tile) != Vector2i(0, 0):
+				return false
+	# Must not overlap any player already in the scene.
+	for child in players.get_children():
+		if child.global_position.distance_to(pos) < 60.0:
+			return false
+	return true
+
+func _spawn_local_player() -> void:
+	var my_id := multiplayer.get_unique_id()
+	if players.has_node(str(my_id)):
+		print("Local player already spawned, skipping.")
+		return
+	var my_team = peer_teams.get(my_id, -1)
+	var spawn_pos := _get_spawn_position(my_team, my_id)
+	var player = player_scene.instantiate()
+	player.name = str(my_id)
+	player.position = spawn_pos
+	player.is_player_one = (my_team == 1)
+	player.team_id = my_team
+	player.is_local_player = true
+	players.add_child(player)
+	player.set_multiplayer_authority(my_id)
+	_apply_player_skin(player, my_id)
+	print("Spawned local player at: ", spawn_pos, " team: ", my_team)
+	spawn_remote_player.rpc(my_id, spawn_pos)
+
+@rpc("any_peer", "call_remote", "reliable")
+func spawn_remote_player(peer_id: int, spawn_pos: Vector2 = Vector2(300, 300)) -> void:
+	if peer_id == multiplayer.get_unique_id():
+		return
+	if players.has_node(str(peer_id)):
+		return
+	print("Spawning remote copy of peer: ", peer_id, " at ", spawn_pos)
+	var player = player_scene.instantiate()
+	player.name = str(peer_id)
+	player.position = spawn_pos
+	player.is_player_one = (peer_teams.get(peer_id, -1) == 1)
+	player.team_id = peer_teams.get(peer_id, -1)
+	player.is_local_player = false
+	players.add_child(player)
+	player.set_multiplayer_authority(peer_id)
+	_apply_player_skin(player, peer_id)
+
+# Called on clients by server to trigger their own spawn
+@rpc("authority", "call_remote", "reliable")
+func _rpc_request_spawn() -> void:
+	print("Server requested spawn for me")
+	call_deferred("_spawn_local_player")
+
+
+# --- Team Selection ---
+
+@rpc("any_peer", "call_local", "reliable")
+func rpc_claim_team(team_id: int) -> void:
+	if not multiplayer.is_server():
+		return
+	var peer_id := multiplayer.get_remote_sender_id()
+	if peer_id == 0:
+		peer_id = multiplayer.get_unique_id()
+	if peer_id in peer_teams:
+		return
+	# Only allow joining a new (empty) team if fewer than 2 teams are already active
+	var active_teams := 0
+	for t in team_counts:
+		if team_counts[t] > 0:
+			active_teams += 1
+	if active_teams >= 2 and team_counts.get(team_id, 0) == 0:
+		return
+	if team_counts.get(team_id, 0) >= max_per_team:
+		return
+	peer_teams[peer_id] = team_id
+	team_counts[team_id] += 1
+	print("Peer ", peer_id, " joined team ", "Blue" if team_id == 1 else "Red")
+	if team_manager:
+		team_manager.peer_teams[peer_id] = team_id
+	# Broadcast to ALL peers including sender
+	rpc_update_team_counts.rpc(team_counts, peer_id, team_id)
+	if peer_teams.size() >= max_players:
+		_begin_game_server()
+
+@rpc("any_peer", "call_local", "reliable")
+func rpc_update_team_counts(counts: Dictionary, joining_peer: int, joining_team: int) -> void:
+	for tid in counts:
+		team_counts[tid] = counts[tid]
+	if joining_peer != -1:
+		peer_teams[joining_peer] = joining_team
+		if team_manager:
+			team_manager.peer_teams[joining_peer] = joining_team
+	var my_team = peer_teams.get(multiplayer.get_unique_id(), -1)
+	emit_signal("team_data_updated", team_counts, my_team)
+
+# Server-only: starts the game and tells clients
+func _begin_game_server() -> void:
+	if not multiplayer.is_server():
+		return
+	print("Server starting game...")
+	_start_game()
+	emit_signal("game_started")
+	# Tell each client to start game and spawn
+	_rpc_begin_game_client.rpc()
+	# Server has no player to spawn
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_begin_game_client() -> void:
+	print("Client received game start")
+	emit_signal("game_started")
+	_start_game()
+	call_deferred("_spawn_local_player")
+
+
+# --- Game Logic ---
+
+func _start_game() -> void:
+	is_game_active = true
+	game_timer = 180.0
+	_assign_team_slots()  # runs on all peers — team_counts is already synced
+	for tid in scores:
+		scores[tid] = 0
+	_spawn_home_zones()
+	if multiplayer.is_server():
+		# Determine attacker (slot 0) and defender (slot 1)
+		for tid in team_slot_map:
+			if team_slot_map[tid] == 0:
+				attacker_team_id = tid
+		print("Attacker team: ", attacker_team_id)
+		# Spawn the prize chest at the map centre
+		_spawn_chest()
+		# Spawn 1 NPC per active team
+		_spawn_npcs()
+		rpc_update_scores.rpc(scores)
+
+## Spawn the prize chest at the position defined in level.json (chest_position).
+## Falls back to the geometric centre of the map if no position is set.
+func _spawn_chest() -> void:
+	if not multiplayer.is_server():
+		return
+	# Read chest position from level.json
+	var pos := Vector2(1752.0, 2752.0)   # default: centre of room_center_mid
+	var file := FileAccess.open("res://JSON/level.json", FileAccess.READ)
+	if file != null:
+		var json := JSON.new()
+		if json.parse(file.get_as_text()) == OK:
+			var cp = json.data.get("chest_position", null)
+			if cp != null:
+				pos = Vector2(cp["x"], cp["y"])
+		file.close()
+
+	var chest: Node = chest_scene.instantiate()
+	chest.name = "PrizeChest"
+	chest.position = pos
+	get_parent().add_child(chest)
+	chest_node = chest
+	# Tell clients to create their visual copy
+	rpc_spawn_chest.rpc(pos)
+	print("Prize chest spawned at ", pos)
+
+
+@rpc("authority", "call_remote", "reliable")
+func rpc_spawn_chest(pos: Vector2) -> void:
+	var chest: Node = chest_scene.instantiate()
+	chest.name = "PrizeChest"
+	chest.position = pos
+	get_parent().add_child(chest)
+
+
+## Spawn one NPC for every active team.
+## The NPC starts at the team's first spawn position.
+func _spawn_npcs() -> void:
+	if not multiplayer.is_server():
+		return
+	var npc_index := 0
+	for tid in team_slot_map:
+		if team_counts.get(tid, 0) == 0:
+			continue
+		var spawn_pos := _get_spawn_position(tid)
+		var npc: Node = npc_scene.instantiate()
+		var npc_name := "NPC_%d_%d" % [tid, npc_index]
+		npc.name = npc_name
+		npc.team_id = tid
+		npc.position = spawn_pos
+		npc.home_position = spawn_pos
+		npc.network_manager = self
+		players.add_child(npc)   # reuse the Players container
+		npc_nodes[npc_name] = npc
+
+		# Apply team colour
+		var cfg := _get_team_config(tid)
+		var c_arr = cfg.get("color", null)
+		if c_arr != null:
+			npc.apply_team_color(Color(c_arr[0], c_arr[1], c_arr[2]))
+
+		# Tell clients to place a visual copy
+		rpc_spawn_npc.rpc(npc_name, tid, spawn_pos)
+		npc_index += 1
+	print("Spawned ", npc_index, " NPC(s)")
+
+
+@rpc("authority", "call_remote", "reliable")
+func rpc_spawn_npc(npc_name: String, tid: int, pos: Vector2) -> void:
+	if players.has_node(npc_name):
+		return
+	var npc: Node = npc_scene.instantiate()
+	npc.name = npc_name
+	npc.team_id = tid
+	npc.position = pos
+	npc.home_position = pos
+	players.add_child(npc)
+	var cfg := _get_team_config(tid)
+	var c_arr = cfg.get("color", null)
+	if c_arr != null:
+		npc.apply_team_color(Color(c_arr[0], c_arr[1], c_arr[2]))
+
+
+## Called by an NPC that was carrying the prize when it died.
+## Restores the prize to the chest.
+func on_prize_dropped(_drop_pos: Vector2) -> void:
+	if not multiplayer.is_server():
+		return
+	print("Prize dropped — returning to chest")
+	if is_instance_valid(chest_node):
+		chest_node.restore_prize()
+	# Clear prize state from all characters
+	for child in players.get_children():
+		if child.is_in_group("npc"):
+			if child.get("carries_prize") == true:
+				child.rpc("rpc_set_carries_prize", false)
+		else:
+			var flag_id = child.get("carried_flag_team")
+			if flag_id != null and flag_id == 0:
+				child.rpc("rpc_set_flag", -1)
+
+
+## Called by HomeZone when the attacker team delivers the prize.
+## Attackers win immediately.
+func on_prize_scored(scoring_team: int) -> void:
+	if not multiplayer.is_server():
+		return
+	print("Prize scored by team ", scoring_team, " — ATTACKERS WIN!")
+	scores[scoring_team] = scores.get(scoring_team, 0) + 1
+	rpc_update_scores.rpc(scores)
+	_end_game()
+
+
+func _end_game() -> void:
+	is_game_active = false
+	rpc_show_game_over.rpc()
+	print("Game Over! Scores: ", scores)
+
+func _create_flag_at(flag_team_id: int, pos: Vector2) -> void:
+	if flag_instances.get(flag_team_id) != null:
+		flag_instances[flag_team_id].queue_free()
+	var flag_scene := preload("res://Scenes/Flag.tscn")
+	var flag := flag_scene.instantiate()
+	flag.flag_team_id = flag_team_id
+	flag.global_position = pos
+	add_child(flag)
+	flag_instances[flag_team_id] = flag
+	var flag_config := _get_team_config(flag_team_id)
+	var flag_img: String = flag_config.get("flag_image", "")
+	if flag_img != "":
+		flag.apply_skin("res://" + flag_img)
+
+func spawn_flag(flag_team_id: int) -> void:
+	var slot := _get_slot_config(flag_team_id)
+	var fp = slot.get("flag_position", null)
+	var pos: Vector2
+	if fp != null:
+		pos = Vector2(fp["x"], fp["y"])
+	else:
+		var slot_idx: int = team_slot_map.get(flag_team_id, 0)
+		pos = Vector2(384, 224) if slot_idx == 0 else Vector2(3184, 5344)
+	flags_at_home[flag_team_id] = true
+	_create_flag_at(flag_team_id, pos)
+	rpc_spawn_flag.rpc(flag_team_id, pos)
+
+func remove_flag(flag_team_id: int) -> void:
+	flags_at_home[flag_team_id] = false
+	if flag_instances.get(flag_team_id) != null:
+		flag_instances[flag_team_id].queue_free()
+		flag_instances[flag_team_id] = null
+	rpc_remove_flag.rpc(flag_team_id)
+
+func respawn_flag(flag_team_id: int) -> void:
+	spawn_flag(flag_team_id)
+
+func drop_flag(flag_team_id: int, drop_pos: Vector2) -> void:
+	flags_at_home[flag_team_id] = false
+	_create_flag_at(flag_team_id, drop_pos)
+	rpc_drop_flag.rpc(flag_team_id, drop_pos)
+
+
+# --- RPCs ---
+
+@rpc("any_peer", "call_local", "reliable")
+func rpc_update_scores(new_scores: Dictionary) -> void:
+	for tid in new_scores:
+		scores[tid] = new_scores[tid]
+
+func score_for_team(team_id: int) -> void:
+	scores[team_id] = scores.get(team_id, 0) + 1
+	rpc_update_scores.rpc(scores)
+	print("Score: ", scores)
+
+func _spawn_home_zones() -> void:
+	for child in get_parent().get_children():
+		if child.is_in_group("home_zone"):
+			child.queue_free()
+	var hz_scene: PackedScene = preload("res://Scenes/HomeZone.tscn")
+	for tid in team_slot_map:
+		var slot := _get_slot_config(tid)
+		var hp = slot.get("home_zone_position", null)
+		if hp == null:
+			continue
+		var zone: Node = hz_scene.instantiate()
+		zone.team_id = tid
+		zone.position = Vector2(hp["x"], hp["y"])
+		zone.add_to_group("home_zone")
+		get_parent().add_child(zone)
+
+@rpc("any_peer", "call_remote", "reliable")
+func rpc_spawn_flag(flag_team_id: int, pos: Vector2) -> void:
+	flags_at_home[flag_team_id] = true
+	_create_flag_at(flag_team_id, pos)
+
+@rpc("any_peer", "call_remote", "reliable")
+func rpc_remove_flag(flag_team_id: int) -> void:
+	flags_at_home[flag_team_id] = false
+	if flag_instances.get(flag_team_id) != null:
+		flag_instances[flag_team_id].queue_free()
+		flag_instances[flag_team_id] = null
+
+@rpc("any_peer", "call_remote", "reliable")
+func rpc_drop_flag(flag_team_id: int, drop_pos: Vector2) -> void:
+	flags_at_home[flag_team_id] = false
+	_create_flag_at(flag_team_id, drop_pos)
+
+@rpc("any_peer", "call_remote", "reliable")
+func rpc_show_game_over() -> void:
+	print("Game Over!")
+	emit_signal("game_over")
+
+@rpc("authority", "call_remote", "reliable")
+func rpc_set_game_mode(p_max_players: int, p_max_per_team: int) -> void:
+	max_players = p_max_players
+	max_per_team = p_max_per_team
+	emit_signal("game_mode_updated")

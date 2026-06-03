@@ -1,0 +1,26 @@
+[gd_scene format=3 uid="uid://chestscndist"]
+
+[ext_resource type="Script" path="res://Scripts/Chest.gd" id="1_chestgd"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_chest"]
+size = Vector2(80, 80)
+
+[node name="Chest" type="Area2D"]
+collision_layer = 0
+collision_mask = 1
+script = ExtResource("1_chestgd")
+
+[node name="Visual" type="Polygon2D" parent="."]
+polygon = PackedVector2Array(-32, -32, 32, -32, 32, 32, -32, 32)
+color = Color(1, 0.8, 0.1, 1)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+shape = SubResource("RectangleShape2D_chest")
+
+[node name="Label" type="Label" parent="."]
+offset_left = -32.0
+offset_top = 34.0
+offset_right = 32.0
+offset_bottom = 50.0
+text = "PRIZE"
+horizontal_alignment = 1

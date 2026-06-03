@@ -1,0 +1,84 @@
+[gd_scene format=3 uid="uid://d0a1b2c3d4e5"]
+
+[ext_resource type="Script" uid="uid://duhdul0h3ibqb" path="res://Scripts/Player.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://pgo1cadf20q5" path="res://icon.svg" id="2_kyqiw"]
+[ext_resource type="Texture2D" uid="uid://f2u2461nv1ew" path="res://Assets/gun.png" id="3_gntrk"]
+[ext_resource type="Texture2D" uid="uid://d2eb1rwfewtr" path="res://Assets/flag.png" id="4_flag"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_kyqiw"]
+size = Vector2(128, 128)
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_flag"]
+radius = 50.0
+
+[node name="Player" type="CharacterBody2D" unique_id=1494528578]
+scale = Vector2(0.5, 0.5)
+script = ExtResource("1")
+
+[node name="Camera2D" type="Camera2D" parent="." unique_id=199944164]
+enabled = false
+
+[node name="Sprite" type="Sprite2D" parent="." unique_id=2107987906]
+texture = ExtResource("2_kyqiw")
+region_rect = Rect2(0, 0, 32, 32)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=333763636]
+shape = SubResource("RectangleShape2D_kyqiw")
+
+[node name="WeaponHolder" type="Node2D" parent="." unique_id=2100537290]
+
+[node name="Sprite2D" type="Sprite2D" parent="WeaponHolder" unique_id=312177372]
+texture_filter = 1
+texture = ExtResource("3_gntrk")
+
+[node name="FlagArea" type="Area2D" parent="." unique_id=109476146]
+collision_mask = 2
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="FlagArea" unique_id=334954545]
+shape = SubResource("CircleShape2D_flag")
+
+[node name="HomeZoneArea" type="Area2D" parent="." unique_id=1280799371]
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="HomeZoneArea" unique_id=427232630]
+
+[node name="P1Zone" type="ColorRect" parent="HomeZoneArea" unique_id=472180080]
+visible = false
+color = Color(0.2, 0.8, 0.3, 0.3)
+
+[node name="P2Zone" type="ColorRect" parent="HomeZoneArea" unique_id=980094483]
+visible = false
+color = Color(0.8, 0.2, 0.3, 0.3)
+
+[node name="AmmoUI" type="Label" parent="." unique_id=1138871616]
+offset_left = -61.0
+offset_top = -94.0
+offset_right = 8.0
+offset_bottom = -71.0
+text = "Ammo: 6"
+
+[node name="ScoreUI" type="Label" parent="." unique_id=551945954]
+offset_left = -61.0
+offset_top = -120.0
+offset_bottom = -97.0
+text = "Score: 0"
+
+[node name="HealthUI" type="Label" parent="." unique_id=2072400303]
+offset_left = -62.0
+offset_top = -144.0
+offset_right = -1.0
+offset_bottom = -121.0
+text = "HP: 100"
+
+[node name="FlagIndicator" type="ColorRect" parent="." unique_id=1356446965]
+visible = false
+color = Color(1, 1, 0, 0.5)
+
+[node name="FlagHolder" type="Node2D" parent="." unique_id=1400000001]
+visible = false
+position = Vector2(0, -80)
+
+[node name="FlagSprite" type="Sprite2D" parent="FlagHolder" unique_id=1400000002]
+texture_filter = 1
+texture = ExtResource("4_flag")
+
+[connection signal="body_entered" from="FlagArea" to="." method="_on_flag_area_body_entered"]

@@ -1,0 +1,104 @@
+[gd_scene format=3 uid="uid://b336khlq37m8p"]
+
+[ext_resource type="Script" uid="uid://b375kbrovja4q" path="res://Scripts/NPC.gd" id="1_npcgd"]
+[ext_resource type="Texture2D" uid="uid://f2u2461nv1ew" path="res://Assets/gun.png" id="2_guntex"]
+[ext_resource type="Script" uid="uid://bd3xw53ts53ly" path="res://Componenets/AI/Primary/action_selection2.gd" id="3_fcq3e"]
+[ext_resource type="Script" uid="uid://cug3m5liifw78" path="res://Componenets/AI/Secondary/finite_state_machine.gd" id="4_m0lvl"]
+[ext_resource type="Script" uid="uid://c1e07n5bmx4o0" path="res://Componenets/AI/Secondary/fsm_pathfinding.gd" id="5_xdsde"]
+[ext_resource type="Script" uid="uid://cmaqii3xesov4" path="res://Componenets/AI/Secondary/fsm_explore.gd" id="6_analj"]
+[ext_resource type="Script" uid="uid://dq4lpnea5shtt" path="res://Componenets/AI/Secondary/fsm_idle.gd" id="7_epuf7"]
+[ext_resource type="Script" uid="uid://dm8w7fepa5fwc" path="res://Componenets/AI/memory_locations.gd" id="8_m0lvl"]
+[ext_resource type="Script" uid="uid://6j847sohustf" path="res://Componenets/AI/Secondary/fsm_get_prize.gd" id="9_getprz"]
+[ext_resource type="Script" uid="uid://b7gqtsoq8akft" path="res://Componenets/AI/Secondary/fsm_return_prize.gd" id="10_retprz"]
+
+[sub_resource type="CapsuleShape2D" id="CapsuleShape2D_body"]
+radius = 18.0
+height = 36.0
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_sight"]
+radius = 320.0
+
+[node name="NPC" type="CharacterBody2D" unique_id=549421706]
+script = ExtResource("1_npcgd")
+
+[node name="Body" type="Polygon2D" parent="." unique_id=245446608]
+color = Color(0.5, 0.5, 1, 1)
+polygon = PackedVector2Array(-16, -24, 16, -24, 16, 24, -16, 24)
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=1628281177]
+texture_filter = 1
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=994706738]
+shape = SubResource("CapsuleShape2D_body")
+
+[node name="WeaponHolder" type="Node2D" parent="." unique_id=1906092384]
+
+[node name="Sprite2D" type="Sprite2D" parent="WeaponHolder" unique_id=1972843761]
+texture_filter = 1
+position = Vector2(24, 0)
+texture = ExtResource("2_guntex")
+
+[node name="SightArea" type="Area2D" parent="." unique_id=323150545]
+collision_layer = 0
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="SightArea" unique_id=2123049348]
+shape = SubResource("CircleShape2D_sight")
+
+[node name="HealthLabel" type="Label" parent="." unique_id=814183272]
+offset_left = -24.0
+offset_top = -52.0
+offset_right = 24.0
+offset_bottom = -36.0
+text = "HP: 100"
+horizontal_alignment = 1
+
+[node name="AI" type="Node2D" parent="." unique_id=1015389078]
+
+[node name="Primary" type="Node2D" parent="AI" unique_id=976191437]
+
+[node name="ActionSelection2" type="Node" parent="AI/Primary" unique_id=697649720 node_paths=PackedStringArray("actor", "finite_state_machine", "memory_locations")]
+script = ExtResource("3_fcq3e")
+actor = NodePath("../../..")
+finite_state_machine = NodePath("../../Secondary/FiniteStateMachine")
+memory_locations = NodePath("../../Secondary/MemoryLocations")
+metadata/_custom_type_script = "uid://bd3xw53ts53ly"
+
+[node name="Secondary" type="Node2D" parent="AI" unique_id=21529811]
+
+[node name="FiniteStateMachine" type="Node" parent="AI/Secondary" unique_id=741662917 node_paths=PackedStringArray("actor", "primary")]
+script = ExtResource("4_m0lvl")
+actor = NodePath("../../..")
+primary = NodePath("../../Primary/ActionSelection2")
+metadata/_custom_type_script = "uid://cug3m5liifw78"
+
+[node name="FSMPathFinding" type="Node" parent="AI/Secondary/FiniteStateMachine" unique_id=734110668 node_paths=PackedStringArray("actor", "navigation_agent")]
+script = ExtResource("5_xdsde")
+actor = NodePath("../../../..")
+navigation_agent = NodePath("../../../../NavigationAgent2D")
+metadata/_custom_type_script = "uid://c1e07n5bmx4o0"
+
+[node name="FSMExplore" type="Node" parent="AI/Secondary/FiniteStateMachine" unique_id=794694119 node_paths=PackedStringArray("actor")]
+script = ExtResource("6_analj")
+actor = NodePath("../../../..")
+metadata/_custom_type_script = "uid://cmaqii3xesov4"
+
+[node name="FSMIdle" type="Node" parent="AI/Secondary/FiniteStateMachine" unique_id=1704135808 node_paths=PackedStringArray("actor")]
+script = ExtResource("7_epuf7")
+actor = NodePath("../../../..")
+metadata/_custom_type_script = "uid://dq4lpnea5shtt"
+
+[node name="FSMGetPrize" type="Node" parent="AI/Secondary/FiniteStateMachine" unique_id=21131939 node_paths=PackedStringArray("actor")]
+script = ExtResource("9_getprz")
+actor = NodePath("../../../..")
+
+[node name="FSMReturnPrize" type="Node" parent="AI/Secondary/FiniteStateMachine" unique_id=72156491 node_paths=PackedStringArray("actor")]
+script = ExtResource("10_retprz")
+actor = NodePath("../../../..")
+
+[node name="MemoryLocations" type="Node" parent="AI/Secondary" unique_id=2112477761]
+script = ExtResource("8_m0lvl")
+metadata/_custom_type_script = "uid://dm8w7fepa5fwc"
+
+[node name="NavigationAgent2D" type="NavigationAgent2D" parent="." unique_id=918233579]
+radius = 18.0
+avoidance_enabled = true
