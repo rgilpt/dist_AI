@@ -1,7 +1,7 @@
 extends Node
 class_name NetworkManager
 
-var _peer: ENetMultiplayerPeer
+var _peer: WebSocketMultiplayerPeer
 
 var flag_instances: Dictionary = {}   # flag_team_id -> Node2D (null if carried)
 var flags_at_home: Dictionary = {}    # flag_team_id -> bool
@@ -14,13 +14,15 @@ var team_slot_map: Dictionary = {}
 var is_game_active: bool = false
 var game_timer: float = 180.0
 
-var server_address: String = "127.0.0.1"
 var server_port: int = 7777
 var is_host: bool = false
-var max_peers: int = 4
 
 var max_players: int = 2
 var max_per_team: int = 1
+
+## Default URL used when no --address argument is given.
+## Change to wss:// if IIS has SSL enabled on the site.
+const DEFAULT_WS_URL: String = "wss://mflxp.pt/game_ai"
 
 signal flag_spawned
 signal flag_picked_up
@@ -31,17 +33,6 @@ signal team_data_updated(counts: Dictionary, your_team: int)
 signal game_started
 signal game_mode_updated
 signal discovery_status(message: String)
-
-const DISCOVERY_PORT: int = 7778
-const DISCOVERY_MSG: String = "DISCOVER_DIST"
-const DISCOVERY_RESPONSE: String = "DIST_SERVER"
-const DISCOVERY_INTERVAL: float = 1.0
-const DISCOVERY_TIMEOUT: float = 10.0
-
-var _discovery_udp: PacketPeerUDP = null
-var _discovering: bool = false
-var _discovery_timer: float = 0.0
-var _discovery_elapsed: float = 0.0
 
 var _initialized: bool = false
 var player_scene = preload("res://Scenes/Player.tscn")
@@ -85,33 +76,30 @@ func _ready():
 		print("Game mode: 1v1")
 
 	if "--server" in args:
-		print("Initializing as SERVER...")
+		print("Initializing as SERVER (WebSocket port %d)..." % server_port)
 		is_host = true
-		_peer = ENetMultiplayerPeer.new()
-		var error: Error = _peer.create_server(server_port, max_peers)
+		_peer = WebSocketMultiplayerPeer.new()
+		var error: Error = _peer.create_server(server_port)
 		if error != OK:
-			printerr("Server creation failed: ", error)
+			printerr("WebSocket server creation failed: ", error)
 			return
 		multiplayer.multiplayer_peer = _peer
 		_peer.peer_connected.connect(_on_peer_connected)
 		_peer.peer_disconnected.connect(_on_peer_disconnected)
-		_start_discovery_listener()
-		print("Host ready. Max peers: ", max_peers)
+		print("WebSocket server ready on port ", server_port)
 
 	elif "--client" in args:
 		var addr_index := args.find("--address")
 		if addr_index != -1 and addr_index + 1 < args.size():
-			# Address provided explicitly — connect immediately
-			server_address = args[addr_index + 1]
-			_connect_to_server(server_address)
+			var raw: String = args[addr_index + 1]
+			_connect_to_server(raw)
 		else:
-			# No address — discover server on local network
-			_start_discovery_broadcast()
+			# No address — connect to the production server via IIS proxy
+			_connect_to_server(DEFAULT_WS_URL)
 	else:
 		printerr("No --server or --client argument provided.")
 
 func _process(delta: float) -> void:
-	_process_discovery(delta)
 	if not is_game_active:
 		return
 	if not multiplayer.is_server():
@@ -120,90 +108,25 @@ func _process(delta: float) -> void:
 	if game_timer <= 0:
 		_end_game()
 
-# --- LAN Discovery ---
-
-func _start_discovery_listener() -> void:
-	_discovery_udp = PacketPeerUDP.new()
-	var err := _discovery_udp.bind(DISCOVERY_PORT)
-	if err != OK:
-		printerr("Discovery listener failed to bind port ", DISCOVERY_PORT, ": ", err)
-		_discovery_udp = null
-		return
-	print("Discovery listener active on port ", DISCOVERY_PORT)
-
-func _start_discovery_broadcast() -> void:
-	_discovery_udp = PacketPeerUDP.new()
-	_discovery_udp.set_broadcast_enabled(true)
-	# Bind to a reply port so the server knows where to send the response
-	var err := _discovery_udp.bind(DISCOVERY_PORT + 1)
-	if err != OK:
-		printerr("Discovery broadcast socket failed: ", err, " — falling back to localhost")
-		_discovery_udp = null
-		_connect_to_server("127.0.0.1")
-		return
-	_discovering = true
-	_discovery_elapsed = 0.0
-	_discovery_timer = DISCOVERY_INTERVAL  # fire immediately on first frame
-	emit_signal("discovery_status", "Searching for server on local network...")
-	print("LAN discovery started")
-
 func _connect_to_server(address: String) -> void:
-	server_address = address
-	_peer = ENetMultiplayerPeer.new()
-	var error: Error = _peer.create_client(server_address, server_port)
+	# Accept a bare IP/hostname or a full ws:// / wss:// URL.
+	var url: String
+	if address.begins_with("ws://") or address.begins_with("wss://"):
+		url = address
+	elif address == "127.0.0.1" or address == "localhost":
+		# Local testing — connect directly to the server port, no proxy path
+		url = "ws://%s:%d" % [address, server_port]
+	else:
+		# Bare hostname — route through the IIS proxy path (SSL)
+		url = "wss://%s/game_ai" % address
+	_peer = WebSocketMultiplayerPeer.new()
+	var error: Error = _peer.create_client(url)
 	if error != OK:
-		printerr("Client connection failed: ", error)
+		printerr("WebSocket client connection failed: ", error)
 		return
 	multiplayer.multiplayer_peer = _peer
 	multiplayer.connected_to_server.connect(_on_connected_to_server)
-	print("Connecting to ", server_address, ":", server_port)
-
-func _process_discovery(delta: float) -> void:
-	if _discovery_udp == null:
-		return
-
-	if is_host:
-		# Server: respond to any discovery broadcast
-		while _discovery_udp.get_available_packet_count() > 0:
-			var packet := _discovery_udp.get_packet()
-			if packet.get_string_from_utf8() == DISCOVERY_MSG:
-				var client_ip := _discovery_udp.get_packet_ip()
-				var client_port := _discovery_udp.get_packet_port()
-				print("Discovery request from ", client_ip, " — responding")
-				_discovery_udp.set_dest_address(client_ip, client_port)
-				_discovery_udp.put_packet(DISCOVERY_RESPONSE.to_utf8_buffer())
-	else:
-		# Client: broadcast until server responds or timeout
-		if not _discovering:
-			return
-		_discovery_elapsed += delta
-		_discovery_timer += delta
-
-		if _discovery_timer >= DISCOVERY_INTERVAL:
-			_discovery_timer = 0.0
-			_discovery_udp.set_dest_address("255.255.255.255", DISCOVERY_PORT)
-			_discovery_udp.put_packet(DISCOVERY_MSG.to_utf8_buffer())
-			print("Broadcasting discovery... (%.0fs)" % _discovery_elapsed)
-
-		while _discovery_udp.get_available_packet_count() > 0:
-			var packet := _discovery_udp.get_packet()
-			if packet.get_string_from_utf8() == DISCOVERY_RESPONSE:
-				var found_ip := _discovery_udp.get_packet_ip()
-				print("Server found at ", found_ip)
-				_discovering = false
-				_discovery_udp.close()
-				_discovery_udp = null
-				emit_signal("discovery_status", "Found server at " + found_ip)
-				_connect_to_server(found_ip)
-				return
-
-		if _discovery_elapsed >= DISCOVERY_TIMEOUT:
-			print("Discovery timed out — falling back to 127.0.0.1")
-			_discovering = false
-			_discovery_udp.close()
-			_discovery_udp = null
-			emit_signal("discovery_status", "No server found. Trying localhost...")
-			_connect_to_server("127.0.0.1")
+	print("Connecting to ", url)
 
 func _get_level_builder():
 	if level_builder == null:
