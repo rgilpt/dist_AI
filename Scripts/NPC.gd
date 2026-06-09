@@ -41,6 +41,7 @@ var network_manager: Node = null
 @onready var _collision: CollisionShape2D = $CollisionShape2D
 
 const BULLET_SCENE = preload("res://Scenes/Weapon.tscn")
+@onready var action_selection_2: ActionSelection2 = $AI/Primary/ActionSelection2
 
 # ── Internal AI state ──────────────────────────────────────────
 var _target_enemy: Node2D = null
@@ -132,7 +133,7 @@ func _physics_process(delta: float) -> void:
 			#_do_fight()
 		#Action.DEFEND:
 			#_do_defend()
-
+	action_selection_2.has_prize = carries_prize
 	move_and_slide()
 
 	# Broadcast transform to all clients

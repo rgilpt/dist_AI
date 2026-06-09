@@ -49,3 +49,7 @@ layout_mode = 2
 [node name="StartBtn" type="Button" parent="Panel/VBox" unique_id=301909543]
 layout_mode = 2
 text = "Force Start"
+
+[node name="ResetBtn" type="Button" parent="Panel/VBox" unique_id=412010644]
+layout_mode = 2
+text = "Reset Game"

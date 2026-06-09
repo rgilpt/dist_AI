@@ -15,6 +15,8 @@ const EPOCHS = 1000
 var has_started = false
 var set_get_next_action = false
 
+var has_prize = false
+
 enum actions{
 	PATHFINDING_KEY,
 	PATHFINDING_CHANGE_LEVEL,
@@ -129,6 +131,7 @@ func mapping_value_linear(input:float, min_input:float, max_input:float, min_val
 func start():
 	has_started = true
 	set_get_next_action = true
+	has_prize = false
 
 func _process(delta: float) -> void:
 	if has_started:
@@ -173,5 +176,9 @@ func _process(delta: float) -> void:
 					finite_state_machine.set_state(state)
 			set_get_next_action = false
 	else:
-		var state = finite_state_machine.get_state_name("GetPrize")
+		var state = null
+		if has_prize:
+			state = finite_state_machine.get_state_name("ReturnPrize")
+		else:
+			state = finite_state_machine.get_state_name("GetPrize")
 		finite_state_machine.set_state(state)

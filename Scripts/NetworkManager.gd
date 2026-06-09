@@ -97,7 +97,8 @@ func _ready():
 			# No address — connect to the production server via IIS proxy
 			_connect_to_server(DEFAULT_WS_URL)
 	else:
-		printerr("No --server or --client argument provided.")
+		# No launch argument — default to client connecting to the production server
+		_connect_to_server(DEFAULT_WS_URL)
 
 func _process(delta: float) -> void:
 	if not is_game_active:
@@ -567,6 +568,46 @@ func _end_game() -> void:
 	is_game_active = false
 	rpc_show_game_over.rpc()
 	print("Game Over! Scores: ", scores)
+
+
+## Wipe all in-game entities and restart with the same connected players/teams.
+func reset_game() -> void:
+	if not multiplayer.is_server():
+		return
+	print("Resetting game...")
+	is_game_active = false
+	# Tell clients to clean up their scenes first
+	rpc_reset_game_client.rpc()
+	# Server cleans up too
+	_cleanup_game_entities()
+	# Small delay so clients finish cleanup before new spawns arrive
+	await get_tree().create_timer(0.3).timeout
+	_begin_game_server()
+
+
+@rpc("authority", "call_remote", "reliable")
+func rpc_reset_game_client() -> void:
+	_cleanup_game_entities()
+
+
+## Remove all spawned in-game nodes: players, NPCs, chest, home zones.
+func _cleanup_game_entities() -> void:
+	# Players and NPCs
+	for child in players.get_children():
+		child.queue_free()
+	npc_nodes.clear()
+	chest_node = null
+	# Chest node in scene root
+	var chest := get_parent().get_node_or_null("PrizeChest")
+	if chest:
+		chest.queue_free()
+	# Home zones
+	for child in get_parent().get_children():
+		if child.is_in_group("home_zone"):
+			child.queue_free()
+	# Reset scores
+	for tid in scores:
+		scores[tid] = 0
 
 func _create_flag_at(flag_team_id: int, pos: Vector2) -> void:
 	if flag_instances.get(flag_team_id) != null:

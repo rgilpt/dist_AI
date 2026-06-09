@@ -100,5 +100,5 @@ script = ExtResource("8_m0lvl")
 metadata/_custom_type_script = "uid://dm8w7fepa5fwc"
 
 [node name="NavigationAgent2D" type="NavigationAgent2D" parent="." unique_id=918233579]
-radius = 18.0
 avoidance_enabled = true
+radius = 18.0

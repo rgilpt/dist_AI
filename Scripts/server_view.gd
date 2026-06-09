@@ -6,6 +6,7 @@ extends Control
 @onready var scores_lbl: Label = $Panel/VBox/Scores
 @onready var timer_lbl: Label = $Panel/VBox/Timer
 @onready var start_btn: Button = $Panel/VBox/StartBtn
+@onready var reset_btn: Button = $Panel/VBox/ResetBtn
 
 var nm: Node = null
 
@@ -22,6 +23,8 @@ func _ready():
 
 	start_btn.pressed.connect(_on_start_pressed)
 	start_btn.visible = false  # only show if server wants to force start
+	reset_btn.pressed.connect(_on_reset_pressed)
+	reset_btn.visible = false
 
 	_update_status("Waiting for players to connect...")
 
@@ -67,9 +70,14 @@ func _on_start_pressed() -> void:
 	print("Server force-starting game...")
 	nm._begin_game_server()
 
+func _on_reset_pressed() -> void:
+	print("Server resetting game...")
+	nm.reset_game()
+
 func _on_game_started() -> void:
 	_update_status("Game in progress!")
 	start_btn.visible = false
+	reset_btn.visible = true
 	timer_lbl.visible = true
 	scores_lbl.visible = true
 
@@ -83,6 +91,7 @@ func _on_game_over() -> void:
 		parts.append("%s: %d" % [tname, nm.scores[tid]])
 	_update_status("Game Over!\n" + "  |  ".join(parts))
 	timer_lbl.visible = false
+	reset_btn.visible = true
 
 func _update_status(text: String) -> void:
 	if status_lbl:
