@@ -29,7 +29,7 @@ func _process(delta: float) -> void:
 		for tid in nm.scores:
 			if nm.team_counts.get(tid, 0) == 0:
 				continue
-			var cfg := nm._get_team_config(tid)
+			var cfg = nm._get_team_config(tid)
 			parts.append("%s: %d" % [cfg.get("team_name", "Team %d" % tid), nm.scores[tid]])
 		scores_lbl.text = "  |  ".join(parts)
 

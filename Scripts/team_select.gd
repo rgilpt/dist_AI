@@ -115,7 +115,7 @@ func _on_game_started() -> void:
 
 
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_VISIBILITY_CHANGED and visible:
+	if what == NOTIFICATION_VISIBILITY_CHANGED and visible and is_node_ready():
 		# Rebuild buttons and refresh state when shown again after a reset
 		my_team = -1
 		update_ui()
