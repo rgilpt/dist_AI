@@ -38,6 +38,9 @@ func _on_sent_to_lobby() -> void:
 	team_select.visible = false
 	lobby.visible = true
 	lobby.activate()
+	# Lobby is full-screen opaque; camera is irrelevant while it's showing,
+	# but re-enable now so it's ready when lobby closes.
+	lobby_camera.reset()
 	lobby_camera.enabled = true
 
 
@@ -47,6 +50,7 @@ func _on_round_ended(duration: float) -> void:
 	team_select.visible = false
 	lobby.visible = true
 	lobby.activate_post_game(duration)
+	lobby_camera.reset()
 	lobby_camera.enabled = true
 
 

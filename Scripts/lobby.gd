@@ -1,10 +1,10 @@
 extends Control
 
-@onready var status_lbl:   Label  = $Panel/VBox/Status
-@onready var scores_lbl:   Label  = $Panel/VBox/Scores
-@onready var timer_lbl:    Label  = $Panel/VBox/Timer
-@onready var drop_btn:     Button = $Panel/VBox/DropAmmoBtn
-@onready var cooldown_lbl: Label  = $Panel/VBox/CooldownLbl
+@onready var status_lbl:   Label  = $BG/Center/Panel/VBox/Status
+@onready var scores_lbl:   Label  = $BG/Center/Panel/VBox/Scores
+@onready var timer_lbl:    Label  = $BG/Center/Panel/VBox/Timer
+@onready var drop_btn:     Button = $BG/Center/Panel/VBox/DropAmmoBtn
+@onready var cooldown_lbl: Label  = $BG/Center/Panel/VBox/CooldownLbl
 
 const DROP_COOLDOWN: float = 10.0
 

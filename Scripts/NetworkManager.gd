@@ -419,6 +419,9 @@ func rpc_claim_selection(team_id: int, role: int) -> void:
 		return
 	if not team_counts.has(team_id):
 		return
+	# Hard cap: never accept more submissions than there are player slots.
+	if peer_role_prefs.size() >= max_players:
+		return
 	peer_role_prefs[peer_id] = {team = team_id, role = role}
 	rpc_sync_role_waiting.rpc(peer_role_prefs.size(), max_players)
 	if peer_role_prefs.size() >= max_players:
@@ -430,6 +433,9 @@ func rpc_sync_role_waiting(count: int, total: int) -> void:
 
 ## Resolve team + role conflicts, broadcast assignments, start the game.
 func _resolve_selections() -> void:
+	# Mark active immediately so any in-flight rpc_claim_selection calls are rejected.
+	is_game_active = true
+
 	# ── Resolve team conflicts (first-come keeps preference; others get any free team) ──
 	var team_to_peers: Dictionary = {}
 	for pid in peer_role_prefs:
@@ -712,6 +718,8 @@ func _start_next_round() -> void:
 	peer_role_prefs.clear()
 	peer_teams.clear()
 	lobby_peers.clear()
+	team_slot_map.clear()
+	attacker_team_id = -1
 	for tid in team_counts:
 		team_counts[tid] = 0
 	for tid in scores:
@@ -763,6 +771,8 @@ func reset_game() -> void:
 		team_counts[tid] = 0
 	peer_teams.clear()
 	lobby_peers.clear()
+	team_slot_map.clear()
+	attacker_team_id = -1
 	rpc_update_team_counts.rpc(team_counts, -1, -1)
 
 

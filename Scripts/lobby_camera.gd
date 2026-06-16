@@ -9,6 +9,20 @@ var _panning: bool = false
 var _pan_start_mouse: Vector2 = Vector2.ZERO
 var _pan_start_pos: Vector2 = Vector2.ZERO
 
+var _home_position: Vector2 = Vector2.ZERO
+var _home_zoom: Vector2 = Vector2.ONE
+
+
+func _ready() -> void:
+	_home_position = position
+	_home_zoom     = zoom
+
+
+func reset() -> void:
+	position = _home_position
+	zoom     = _home_zoom
+	_panning = false
+
 
 func _unhandled_input(event: InputEvent) -> void:
 	# ── Zoom with scroll wheel ─────────────────────────────────
