@@ -96,6 +96,13 @@ func _input(event):
 		return
 	if event.is_action_pressed("shoot"):
 		fire()
+	if event is InputEventKey and event.keycode == KEY_R and event.pressed and not event.echo:
+		_reload()
+
+
+func _reload() -> void:
+	ammo = 6
+	update_ammo_ui()
 
 func fire():
 	if ammo <= 0 or has_flag:

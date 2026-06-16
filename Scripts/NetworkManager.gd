@@ -33,12 +33,22 @@ signal team_data_updated(counts: Dictionary, your_team: int)
 signal game_started
 signal game_mode_updated
 signal discovery_status(message: String)
+signal sent_to_lobby
+signal released_from_lobby
 
 var _initialized: bool = false
 var player_scene = preload("res://Scenes/Player.tscn")
 var npc_scene = preload("res://Scenes/NPC.tscn")
 var chest_scene = preload("res://Scenes/Chest.tscn")
+var ammo_drop_scene = preload("res://Scenes/AmmoDrop.tscn")
 var team_config: Dictionary = {}
+
+## Active ammo drop nodes, keyed by their unique name.
+var _ammo_drops: Dictionary = {}
+var _ammo_drop_counter: int = 0
+
+## Peers waiting to join the next round.
+var lobby_peers: Array[int] = []
 
 ## Team assigned to slot 0 (the "attacker" — must capture the prize).
 ## Set in _start_game() once team_slot_map is known.
@@ -251,6 +261,10 @@ func _on_peer_connected(id: int) -> void:
 			spawn_remote_player.rpc_id(id, existing_id, child.position)
 	rpc_update_team_counts.rpc_id(id, team_counts, -1, -1)
 	rpc_set_game_mode.rpc_id(id, max_players, max_per_team)
+	# Send to lobby if a game is already running
+	if is_game_active:
+		lobby_peers.append(id)
+		_rpc_go_to_lobby.rpc_id(id)
 
 func _on_peer_disconnected(id: int) -> void:
 	print("Peer disconnected: ", id)
@@ -260,6 +274,7 @@ func _on_peer_disconnected(id: int) -> void:
 		team_counts[peer_teams[id]] -= 1
 		peer_teams.erase(id)
 		rpc_update_team_counts.rpc(team_counts, -1, -1)
+	lobby_peers.erase(id)
 
 
 # --- Spawning ---
@@ -428,7 +443,9 @@ func _rpc_begin_game_client() -> void:
 	print("Client received game start")
 	emit_signal("game_started")
 	_start_game()
-	call_deferred("_spawn_local_player")
+	# Only spawn if this client actually has a team assigned
+	if peer_teams.has(multiplayer.get_unique_id()):
+		call_deferred("_spawn_local_player")
 
 
 # --- Game Logic ---
@@ -567,27 +584,48 @@ func on_prize_scored(scoring_team: int) -> void:
 func _end_game() -> void:
 	is_game_active = false
 	rpc_show_game_over.rpc()
+	_release_lobby_peers()
 	print("Game Over! Scores: ", scores)
 
 
-## Wipe all in-game entities and restart with the same connected players/teams.
+## Move all waiting lobby clients to team selection for the next round.
+func _release_lobby_peers() -> void:
+	for pid in lobby_peers:
+		_rpc_go_to_team_select.rpc_id(pid)
+	lobby_peers.clear()
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_go_to_lobby() -> void:
+	emit_signal("sent_to_lobby")
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_go_to_team_select() -> void:
+	emit_signal("released_from_lobby")
+
+
+## Wipe all in-game entities and send everyone back to team selection.
+## The new round starts automatically once max_players have re-picked teams.
 func reset_game() -> void:
 	if not multiplayer.is_server():
 		return
 	print("Resetting game...")
 	is_game_active = false
-	# Tell clients to clean up their scenes first
 	rpc_reset_game_client.rpc()
-	# Server cleans up too
 	_cleanup_game_entities()
-	# Small delay so clients finish cleanup before new spawns arrive
-	await get_tree().create_timer(0.3).timeout
-	_begin_game_server()
+	# Clear all team assignments so everyone must re-pick
+	for tid in team_counts:
+		team_counts[tid] = 0
+	peer_teams.clear()
+	lobby_peers.clear()
+	rpc_update_team_counts.rpc(team_counts, -1, -1)
 
 
-@rpc("authority", "call_remote", "reliable")
+@rpc("authority", "call_local", "reliable")
 func rpc_reset_game_client() -> void:
 	_cleanup_game_entities()
+	emit_signal("released_from_lobby")  # tells Main to show team_select for everyone
 
 
 ## Remove all spawned in-game nodes: players, NPCs, chest, home zones.
@@ -605,6 +643,11 @@ func _cleanup_game_entities() -> void:
 	for child in get_parent().get_children():
 		if child.is_in_group("home_zone"):
 			child.queue_free()
+	# Ammo drops
+	for drop in _ammo_drops.values():
+		if is_instance_valid(drop):
+			drop.queue_free()
+	_ammo_drops.clear()
 	# Reset scores
 	for tid in scores:
 		scores[tid] = 0
@@ -707,3 +750,71 @@ func rpc_set_game_mode(p_max_players: int, p_max_per_team: int) -> void:
 	max_players = p_max_players
 	max_per_team = p_max_per_team
 	emit_signal("game_mode_updated")
+
+
+# ── Ammo Drops (lobby spectators can drop ammo into the match) ─────────────
+
+## Called by a lobby client pressing the Drop Ammo button.
+@rpc("any_peer", "call_local", "reliable")
+func rpc_request_ammo_drop() -> void:
+	if not multiplayer.is_server():
+		return
+	if not is_game_active:
+		return
+	var sender := multiplayer.get_remote_sender_id()
+	# Only lobby peers may drop ammo
+	if sender != 0 and sender not in lobby_peers:
+		return
+	_server_spawn_ammo_drop()
+
+
+## Server: pick a random spawn position and broadcast the ammo drop.
+func _server_spawn_ammo_drop() -> void:
+	var lb = _get_level_builder()
+	var all_spawns: Array[Vector2] = []
+	if lb != null:
+		for slot in lb.slot_spawns:
+			all_spawns.append_array(slot)
+	if all_spawns.is_empty():
+		all_spawns.append(Vector2(1752, 2752))  # fallback: map centre
+
+	var pos: Vector2 = all_spawns[randi() % all_spawns.size()]
+	# Small random offset so drops don't stack perfectly
+	pos += Vector2(randf_range(-64, 64), randf_range(-64, 64))
+
+	_ammo_drop_counter += 1
+	var drop_name := "AmmoDrop_%d" % _ammo_drop_counter
+	_spawn_ammo_drop_node(drop_name, pos)
+	rpc_sync_ammo_drop.rpc(drop_name, pos)
+
+
+func _spawn_ammo_drop_node(drop_name: String, pos: Vector2) -> void:
+	if _ammo_drops.has(drop_name):
+		return
+	var drop: Node = ammo_drop_scene.instantiate()
+	drop.name = drop_name
+	drop.position = pos
+	get_parent().add_child(drop)
+	_ammo_drops[drop_name] = drop
+
+
+## Called by AmmoDrop.gd when a player picks it up (server only).
+func remove_ammo_drop(drop_name: String) -> void:
+	if not multiplayer.is_server():
+		return
+	if _ammo_drops.has(drop_name):
+		_ammo_drops[drop_name].queue_free()
+		_ammo_drops.erase(drop_name)
+	rpc_remove_ammo_drop.rpc(drop_name)
+
+
+@rpc("authority", "call_remote", "reliable")
+func rpc_sync_ammo_drop(drop_name: String, pos: Vector2) -> void:
+	_spawn_ammo_drop_node(drop_name, pos)
+
+
+@rpc("authority", "call_remote", "reliable")
+func rpc_remove_ammo_drop(drop_name: String) -> void:
+	if _ammo_drops.has(drop_name):
+		_ammo_drops[drop_name].queue_free()
+		_ammo_drops.erase(drop_name)

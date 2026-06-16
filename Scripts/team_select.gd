@@ -111,4 +111,11 @@ func _on_discovery_status(message: String) -> void:
 		btn.disabled = true
 
 func _on_game_started() -> void:
-	queue_free()
+	hide()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_VISIBILITY_CHANGED and visible:
+		# Rebuild buttons and refresh state when shown again after a reset
+		my_team = -1
+		update_ui()

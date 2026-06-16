@@ -2,6 +2,7 @@
 
 [ext_resource type="Script" uid="uid://cck0bwp4qt6q6" path="res://Scripts/Main.gd" id="1"]
 [ext_resource type="Script" uid="uid://lobbycam001" path="res://Scripts/lobby_camera.gd" id="7_lcam"]
+[ext_resource type="PackedScene" uid="uid://lobby001" path="res://Scenes/Lobby.tscn" id="8_lobb"]
 [ext_resource type="PackedScene" uid="uid://cmap1234567" path="res://Scenes/Map.tscn" id="2_idj7w"]
 [ext_resource type="PackedScene" uid="uid://d4bp2vje74nh8" path="res://Scenes/team_select.tscn" id="2_rgh2o"]
 [ext_resource type="Script" uid="uid://yp7l3qm37olp" path="res://Scripts/NetworkManager.gd" id="3_kln2b"]
@@ -34,3 +35,5 @@ grow_vertical = 1
 script = ExtResource("3_pbw6q")
 
 [node name="ServerView" parent="." unique_id=1126660070 instance=ExtResource("6_v1gob")]
+
+[node name="Lobby" parent="." instance=ExtResource("8_lobb")]

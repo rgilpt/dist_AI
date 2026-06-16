@@ -47,24 +47,6 @@ func _ready():
 	wall_tile.add_collision_polygon(0)
 	wall_tile.set_collision_polygon_points(0, 0, PackedVector2Array(collision_shape))
 
-	# ── Navigation layer ─────────────────────────────────────────────────────
-	# Add a navigation layer to the TileSet and give the floor tile a full-tile
-	# polygon.  TileMapLayer then registers every floor cell with the
-	# NavigationServer2D automatically — no manual NavigationRegion2D needed.
-	tile_set.add_navigation_layer()
-	var floor_nav := NavigationPolygon.new()
-	# agent_radius tells the NavigationServer to erode the walkable area
-	# inward by this many pixels from wall tile edges, giving NPCs clearance.
-	# Matches the NPC CapsuleShape2D radius (18 px).
-	floor_nav.agent_radius = 18.0
-	floor_nav.add_outline(PackedVector2Array([
-		Vector2(-16, -16),
-		Vector2( 16, -16),
-		Vector2( 16,  16),
-		Vector2(-16,  16),
-	]))
-	floor_nav.make_polygons_from_outlines()
-	source.get_tile_data(Vector2i(0, 0), 0).set_navigation_polygon(0, floor_nav)
 
 	var file = FileAccess.open("res://JSON/level.json", FileAccess.READ)
 	if file == null:
@@ -98,6 +80,7 @@ func _ready():
 	for corridor in json_result.get("corridors", []):
 		_open_corridor_entries(json_result, corridor)
 	_load_team_slots(json_result)
+	_build_navigation(json_result)
 	print("Slots loaded: ", slot_spawns.size(), " slots")
 	print("Level built successfully!")
 
@@ -339,3 +322,124 @@ func _find_room(level_data: Dictionary, name: String) -> Dictionary:
 		if room.get("name", "") == name:
 			return room
 	return {}
+
+# ── Navigation (explicit NavigationRegion2D nodes) ────────────────────────────
+#
+# One region per room interior + one per corridor segment.
+# Corridor polygons extend to the inner wall edge of each connected room so
+# adjacent regions share an edge and the NavigationServer merges them into a
+# single connected mesh.
+
+func _build_navigation(level_data: Dictionary) -> void:
+	for room in level_data.get("rooms", []):
+		_nav_room(room)
+	for corridor in level_data.get("corridors", []):
+		_nav_corridor(level_data, corridor)
+
+
+func _nav_room(room: Dictionary) -> void:
+	var rx := float(room["position"]["x"])
+	var ry := float(room["position"]["y"])
+	var rw := float(room["size"]["width"])
+	var rh := float(room["size"]["height"])
+	var wt := float(room.get("wall_thickness", 32))
+	_nav_add_rect(
+		Vector2(rx + wt, ry + wt),
+		Vector2(rx + rw - wt, ry + rh - wt)
+	)
+
+
+func _nav_corridor(level_data: Dictionary, corridor: Dictionary) -> void:
+	var s_room := _find_room(level_data, corridor.get("start_room", ""))
+	var e_room := _find_room(level_data, corridor.get("end_room", ""))
+	if s_room.is_empty() or e_room.is_empty():
+		return
+
+	var cw      := float(corridor.get("width", 128))   # corridor width in pixels
+	var s_side  : String = corridor.get("start_side", "")
+	var e_side  : String = corridor.get("end_side", "")
+
+	# Tile-space anchors (one tile outside the room wall on each side)
+	var s_anchor := _get_corridor_start(s_room, corridor)
+	var e_anchor := _get_corridor_end(e_room, corridor)
+
+	var is_vert  := (s_side in ["top", "bottom"]) and (e_side in ["top", "bottom"])
+	var is_horiz := (s_side in ["left", "right"])  and (e_side in ["left", "right"])
+
+	if is_horiz:
+		# Corridor runs left–right.
+		# x spans from inner wall edge of start room to inner wall edge of end room
+		# (this covers both the punched openings and the corridor floor between them).
+		var x0 := _nav_inner_edge(s_room, s_side)
+		var x1 := _nav_inner_edge(e_room, e_side)
+		var y0 := s_anchor.y * 32.0
+		_nav_add_rect(
+			Vector2(minf(x0, x1), y0),
+			Vector2(maxf(x0, x1), y0 + cw)
+		)
+
+	elif is_vert:
+		# Corridor runs top–bottom.
+		var y0 := _nav_inner_edge(s_room, s_side)
+		var y1 := _nav_inner_edge(e_room, e_side)
+		var x0 := s_anchor.x * 32.0
+		_nav_add_rect(
+			Vector2(x0, minf(y0, y1)),
+			Vector2(x0 + cw, maxf(y0, y1))
+		)
+
+	else:
+		# L-shaped: horizontal leg first, then vertical leg.
+		# Corner is at (e_anchor.x, s_anchor.y) in tile space.
+		var cx := e_anchor.x * 32.0   # corner x in pixels
+		var cy := s_anchor.y * 32.0   # corner y in pixels
+
+		# Horizontal leg: from start room inner edge to corner (+ cw so it covers corner area)
+		var hx0 := _nav_inner_edge(s_room, s_side)
+		_nav_add_rect(
+			Vector2(minf(hx0, cx + cw), cy),
+			Vector2(maxf(hx0, cx + cw), cy + cw)
+		)
+		# Vertical leg: from corner to end room inner edge (overlap with horiz leg at corner)
+		var vy := _nav_inner_edge(e_room, e_side)
+		_nav_add_rect(
+			Vector2(cx, minf(cy, vy)),
+			Vector2(cx + cw, maxf(cy + cw, vy))
+		)
+
+
+## Returns the pixel coordinate of the inner face of a room wall on the given side.
+## This is where the room interior meets the wall (and where the corridor begins).
+func _nav_inner_edge(room: Dictionary, side: String) -> float:
+	var rx := float(room["position"]["x"])
+	var ry := float(room["position"]["y"])
+	var rw := float(room["size"]["width"])
+	var rh := float(room["size"]["height"])
+	var wt := float(room.get("wall_thickness", 32))
+	match side:
+		"right":  return rx + rw - wt
+		"left":   return rx + wt
+		"bottom": return ry + rh - wt
+		"top":    return ry + wt
+	return 0.0
+
+
+## Create a NavigationRegion2D with a simple rectangular polygon.
+## Uses direct vertex + index assignment — avoids make_polygons_from_outlines()
+## which produces empty polygons in Godot 4 due to Clipper2 winding issues.
+func _nav_add_rect(top_left: Vector2, bottom_right: Vector2) -> void:
+	var region := NavigationRegion2D.new()
+	var poly   := NavigationPolygon.new()
+	poly.agent_radius = 18.0
+	# Four corners: tl, tr, br, bl
+	poly.vertices = PackedVector2Array([
+		top_left,
+		Vector2(bottom_right.x, top_left.y),
+		bottom_right,
+		Vector2(top_left.x, bottom_right.y),
+	])
+	# Two triangles covering the rectangle
+	poly.add_polygon(PackedInt32Array([0, 1, 2]))
+	poly.add_polygon(PackedInt32Array([0, 2, 3]))
+	region.navigation_polygon = poly
+	get_parent().add_child(region)
