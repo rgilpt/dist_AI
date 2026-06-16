@@ -326,9 +326,13 @@ func _find_room(level_data: Dictionary, name: String) -> Dictionary:
 # ── Navigation (explicit NavigationRegion2D nodes) ────────────────────────────
 #
 # One region per room interior + one per corridor segment.
-# Corridor polygons extend to the inner wall edge of each connected room so
-# adjacent regions share an edge and the NavigationServer merges them into a
-# single connected mesh.
+# All polygons are inset by NAV_MARGIN from wall faces so NPC centres
+# never reach wall tiles.  Corridor end-points align with the inset room
+# edges so adjacent regions still share an edge and the NavigationServer
+# merges them into one connected mesh.
+
+## Inset distance from wall tiles — must be ≥ NPC collision radius (18 px).
+const NAV_MARGIN: float = 20.0
 
 func _build_navigation(level_data: Dictionary) -> void:
 	for room in level_data.get("rooms", []):
@@ -343,9 +347,10 @@ func _nav_room(room: Dictionary) -> void:
 	var rw := float(room["size"]["width"])
 	var rh := float(room["size"]["height"])
 	var wt := float(room.get("wall_thickness", 32))
+	# Inset all four sides so NPCs stay NAV_MARGIN px away from walls
 	_nav_add_rect(
-		Vector2(rx + wt, ry + wt),
-		Vector2(rx + rw - wt, ry + rh - wt)
+		Vector2(rx + wt + NAV_MARGIN, ry + wt + NAV_MARGIN),
+		Vector2(rx + rw - wt - NAV_MARGIN, ry + rh - wt - NAV_MARGIN)
 	)
 
 
@@ -355,11 +360,10 @@ func _nav_corridor(level_data: Dictionary, corridor: Dictionary) -> void:
 	if s_room.is_empty() or e_room.is_empty():
 		return
 
-	var cw      := float(corridor.get("width", 128))   # corridor width in pixels
-	var s_side  : String = corridor.get("start_side", "")
-	var e_side  : String = corridor.get("end_side", "")
+	var cw     := float(corridor.get("width", 128))
+	var s_side : String = corridor.get("start_side", "")
+	var e_side : String = corridor.get("end_side", "")
 
-	# Tile-space anchors (one tile outside the room wall on each side)
 	var s_anchor := _get_corridor_start(s_room, corridor)
 	var e_anchor := _get_corridor_end(e_room, corridor)
 
@@ -367,60 +371,55 @@ func _nav_corridor(level_data: Dictionary, corridor: Dictionary) -> void:
 	var is_horiz := (s_side in ["left", "right"])  and (e_side in ["left", "right"])
 
 	if is_horiz:
-		# Corridor runs left–right.
-		# x spans from inner wall edge of start room to inner wall edge of end room
-		# (this covers both the punched openings and the corridor floor between them).
-		var x0 := _nav_inner_edge(s_room, s_side)
-		var x1 := _nav_inner_edge(e_room, e_side)
-		var y0 := s_anchor.y * 32.0
-		_nav_add_rect(
-			Vector2(minf(x0, x1), y0),
-			Vector2(maxf(x0, x1), y0 + cw)
-		)
+		# Wall sides are top & bottom → inset y.
+		# End-points align with inset room edges → shared edge, no gap.
+		var x0 := _nav_inset_edge(s_room, s_side)
+		var x1 := _nav_inset_edge(e_room, e_side)
+		var y0 := s_anchor.y * 32.0 + NAV_MARGIN
+		var y1 := s_anchor.y * 32.0 + cw - NAV_MARGIN
+		_nav_add_rect(Vector2(minf(x0, x1), y0), Vector2(maxf(x0, x1), y1))
 
 	elif is_vert:
-		# Corridor runs top–bottom.
-		var y0 := _nav_inner_edge(s_room, s_side)
-		var y1 := _nav_inner_edge(e_room, e_side)
-		var x0 := s_anchor.x * 32.0
-		_nav_add_rect(
-			Vector2(x0, minf(y0, y1)),
-			Vector2(x0 + cw, maxf(y0, y1))
-		)
+		# Wall sides are left & right → inset x.
+		var y0 := _nav_inset_edge(s_room, s_side)
+		var y1 := _nav_inset_edge(e_room, e_side)
+		var x0 := s_anchor.x * 32.0 + NAV_MARGIN
+		var x1 := s_anchor.x * 32.0 + cw - NAV_MARGIN
+		_nav_add_rect(Vector2(x0, minf(y0, y1)), Vector2(x1, maxf(y0, y1)))
 
 	else:
-		# L-shaped: horizontal leg first, then vertical leg.
-		# Corner is at (e_anchor.x, s_anchor.y) in tile space.
-		var cx := e_anchor.x * 32.0   # corner x in pixels
-		var cy := s_anchor.y * 32.0   # corner y in pixels
+		# L-shaped: horizontal leg + vertical leg meeting at a corner.
+		var cx := e_anchor.x * 32.0
+		var cy := s_anchor.y * 32.0
 
-		# Horizontal leg: from start room inner edge to corner (+ cw so it covers corner area)
-		var hx0 := _nav_inner_edge(s_room, s_side)
+		# Horizontal leg — inset y (wall sides); junction end left open for overlap
+		var hx0 := _nav_inset_edge(s_room, s_side)
 		_nav_add_rect(
-			Vector2(minf(hx0, cx + cw), cy),
-			Vector2(maxf(hx0, cx + cw), cy + cw)
+			Vector2(minf(hx0, cx + cw), cy + NAV_MARGIN),
+			Vector2(maxf(hx0, cx + cw), cy + cw - NAV_MARGIN)
 		)
-		# Vertical leg: from corner to end room inner edge (overlap with horiz leg at corner)
-		var vy := _nav_inner_edge(e_room, e_side)
+		# Vertical leg — inset x (wall sides); junction end left open for overlap
+		var vy := _nav_inset_edge(e_room, e_side)
 		_nav_add_rect(
-			Vector2(cx, minf(cy, vy)),
-			Vector2(cx + cw, maxf(cy + cw, vy))
+			Vector2(cx + NAV_MARGIN, minf(cy, vy)),
+			Vector2(cx + cw - NAV_MARGIN, maxf(cy + cw, vy))
 		)
 
 
-## Returns the pixel coordinate of the inner face of a room wall on the given side.
-## This is where the room interior meets the wall (and where the corridor begins).
-func _nav_inner_edge(room: Dictionary, side: String) -> float:
+## Pixel coordinate of the wall's inner face, already inset by NAV_MARGIN
+## toward the room centre.  Corridor end-points use this so they align exactly
+## with the inset room polygon edge (shared edge → connected nav mesh).
+func _nav_inset_edge(room: Dictionary, side: String) -> float:
 	var rx := float(room["position"]["x"])
 	var ry := float(room["position"]["y"])
 	var rw := float(room["size"]["width"])
 	var rh := float(room["size"]["height"])
 	var wt := float(room.get("wall_thickness", 32))
 	match side:
-		"right":  return rx + rw - wt
-		"left":   return rx + wt
-		"bottom": return ry + rh - wt
-		"top":    return ry + wt
+		"right":  return rx + rw - wt - NAV_MARGIN
+		"left":   return rx + wt  + NAV_MARGIN
+		"bottom": return ry + rh - wt - NAV_MARGIN
+		"top":    return ry + wt  + NAV_MARGIN
 	return 0.0
 
 

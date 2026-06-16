@@ -22,6 +22,7 @@ func _ready():
 	nm.game_started.connect(_on_game_started)
 	nm.sent_to_lobby.connect(_on_sent_to_lobby)
 	nm.released_from_lobby.connect(_on_released_from_lobby)
+	nm.round_ended.connect(_on_round_ended)
 
 
 func _on_game_started() -> void:
@@ -32,13 +33,26 @@ func _on_game_started() -> void:
 
 
 func _on_sent_to_lobby() -> void:
+	if "--server" in OS.get_cmdline_args():
+		return
 	team_select.visible = false
 	lobby.visible = true
 	lobby.activate()
 	lobby_camera.enabled = true
 
 
+func _on_round_ended(duration: float) -> void:
+	if "--server" in OS.get_cmdline_args():
+		return
+	team_select.visible = false
+	lobby.visible = true
+	lobby.activate_post_game(duration)
+	lobby_camera.enabled = true
+
+
 func _on_released_from_lobby() -> void:
+	if "--server" in OS.get_cmdline_args():
+		return
 	lobby.visible = false
 	team_select.visible = true
 	lobby_camera.enabled = true

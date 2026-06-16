@@ -35,6 +35,7 @@ signal game_mode_updated
 signal discovery_status(message: String)
 signal sent_to_lobby
 signal released_from_lobby
+signal round_ended(duration: float)
 
 var _initialized: bool = false
 var player_scene = preload("res://Scenes/Player.tscn")
@@ -49,6 +50,11 @@ var _ammo_drop_counter: int = 0
 
 ## Peers waiting to join the next round.
 var lobby_peers: Array[int] = []
+
+## How long (seconds) the post-game lobby lasts before auto-returning to team-select.
+const LOBBY_DURATION: float = 12.0
+## Set to false by reset_game() to cancel a pending end-game countdown.
+var _end_game_pending: bool = false
 
 ## Team assigned to slot 0 (the "attacker" — must capture the prize).
 ## Set in _start_game() once team_slot_map is known.
@@ -583,16 +589,39 @@ func on_prize_scored(scoring_team: int) -> void:
 
 func _end_game() -> void:
 	is_game_active = false
-	rpc_show_game_over.rpc()
-	_release_lobby_peers()
+	_end_game_pending = true
 	print("Game Over! Scores: ", scores)
-
-
-## Move all waiting lobby clients to team selection for the next round.
-func _release_lobby_peers() -> void:
-	for pid in lobby_peers:
-		_rpc_go_to_team_select.rpc_id(pid)
+	emit_signal("game_over")   # for server_view
+	# Clean up entities on server; broadcast cleanup + lobby transition to clients.
+	_cleanup_game_entities()
+	rpc_end_round_client.rpc(LOBBY_DURATION)
 	lobby_peers.clear()
+	# After the lobby phase, return everyone to team-select and reset scores.
+	await get_tree().create_timer(LOBBY_DURATION).timeout
+	if _end_game_pending:
+		_start_next_round()
+
+
+func _start_next_round() -> void:
+	_end_game_pending = false
+	for tid in scores:
+		scores[tid] = 0
+	rpc_update_scores.rpc(scores)
+	rpc_go_to_team_select_all.rpc()
+
+
+## Sent to all clients at round end: clean up entities and show the lobby.
+@rpc("authority", "call_remote", "reliable")
+func rpc_end_round_client(duration: float) -> void:
+	_cleanup_game_entities()
+	emit_signal("game_over")
+	emit_signal("round_ended", duration)
+
+
+## Sent to all clients after the lobby countdown: return to team-select.
+@rpc("authority", "call_remote", "reliable")
+func rpc_go_to_team_select_all() -> void:
+	emit_signal("released_from_lobby")
 
 
 @rpc("authority", "call_remote", "reliable")
@@ -611,7 +640,10 @@ func reset_game() -> void:
 	if not multiplayer.is_server():
 		return
 	print("Resetting game...")
+	_end_game_pending = false   # cancel any pending lobby countdown
 	is_game_active = false
+	for tid in scores:
+		scores[tid] = 0
 	rpc_reset_game_client.rpc()
 	_cleanup_game_entities()
 	# Clear all team assignments so everyone must re-pick
@@ -648,9 +680,6 @@ func _cleanup_game_entities() -> void:
 		if is_instance_valid(drop):
 			drop.queue_free()
 	_ammo_drops.clear()
-	# Reset scores
-	for tid in scores:
-		scores[tid] = 0
 
 func _create_flag_at(flag_team_id: int, pos: Vector2) -> void:
 	if flag_instances.get(flag_team_id) != null:
@@ -739,11 +768,6 @@ func rpc_remove_flag(flag_team_id: int) -> void:
 func rpc_drop_flag(flag_team_id: int, drop_pos: Vector2) -> void:
 	flags_at_home[flag_team_id] = false
 	_create_flag_at(flag_team_id, drop_pos)
-
-@rpc("any_peer", "call_remote", "reliable")
-func rpc_show_game_over() -> void:
-	print("Game Over!")
-	emit_signal("game_over")
 
 @rpc("authority", "call_remote", "reliable")
 func rpc_set_game_mode(p_max_players: int, p_max_per_team: int) -> void:
