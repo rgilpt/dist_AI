@@ -442,4 +442,4 @@ func _nav_add_rect(top_left: Vector2, bottom_right: Vector2) -> void:
 	poly.add_polygon(PackedInt32Array([0, 1, 2]))
 	poly.add_polygon(PackedInt32Array([0, 2, 3]))
 	region.navigation_polygon = poly
-	get_parent().add_child(region)
+	get_parent().add_child.call_deferred(region)
