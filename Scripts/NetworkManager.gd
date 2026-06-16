@@ -52,12 +52,12 @@ var _ammo_drop_counter: int = 0
 ## Peers waiting to join the next round.
 var lobby_peers: Array[int] = []
 
-## Role constants used by rpc_claim_role / _resolve_roles.
+## Role constants used by rpc_claim_selection / _resolve_selections.
 const ROLE_ATTACK: int = 0
 const ROLE_DEFEND: int  = 1
 
-## Server-side collection of role preferences before game start.
-## Cleared by _resolve_roles() and reset_game().
+## Server-side collection of {team, role} preferences before game start.
+## Cleared by _resolve_selections() and reset_game().
 var peer_role_prefs: Dictionary = {}
 
 ## How long (seconds) the post-game lobby lasts before auto-returning to team-select.
@@ -402,52 +402,80 @@ func _rpc_request_spawn() -> void:
 	call_deferred("_spawn_local_player")
 
 
-# --- Role Selection ---
+# --- Team + Role Selection ---
 
-## Client calls this to express a role preference (ROLE_ATTACK or ROLE_DEFEND).
-## Server collects preferences and starts the game once all players have chosen.
+## Client sends its chosen team and role. Server collects and starts once
+## max_players have confirmed. peer_role_prefs stores {team: int, role: int}.
 @rpc("any_peer", "call_remote", "reliable")
-func rpc_claim_role(role: int) -> void:
+func rpc_claim_selection(team_id: int, role: int) -> void:
 	if not multiplayer.is_server():
 		return
 	var peer_id := multiplayer.get_remote_sender_id()
 	if peer_id == 0:
 		peer_id = multiplayer.get_unique_id()
-	if peer_id in peer_teams or peer_id in peer_role_prefs:
+	if is_game_active or peer_id in peer_teams or peer_id in peer_role_prefs or peer_id in lobby_peers:
 		return
 	if role != ROLE_ATTACK and role != ROLE_DEFEND:
 		return
-	peer_role_prefs[peer_id] = role
-	# Broadcast waiting count so clients can update their status label
+	if not team_counts.has(team_id):
+		return
+	peer_role_prefs[peer_id] = {team = team_id, role = role}
 	rpc_sync_role_waiting.rpc(peer_role_prefs.size(), max_players)
 	if peer_role_prefs.size() >= max_players:
-		_resolve_roles()
+		_resolve_selections()
 
 @rpc("authority", "call_remote", "reliable")
 func rpc_sync_role_waiting(count: int, total: int) -> void:
 	emit_signal("role_waiting", count, total)
 
-## Resolve role conflicts, assign teams, then start the game.
-func _resolve_roles() -> void:
-	var want_attack: Array = []
-	var want_defend: Array  = []
+## Resolve team + role conflicts, broadcast assignments, start the game.
+func _resolve_selections() -> void:
+	# ── Resolve team conflicts (first-come keeps preference; others get any free team) ──
+	var team_to_peers: Dictionary = {}
 	for pid in peer_role_prefs:
-		if peer_role_prefs[pid] == ROLE_ATTACK:
+		var tid: int = peer_role_prefs[pid]["team"]
+		if not team_to_peers.has(tid):
+			team_to_peers[tid] = []
+		team_to_peers[tid].append(pid)
+
+	var resolved_team: Dictionary = {}   # peer_id -> team_id
+	var taken_teams:   Array       = []
+	var reassign:      Array       = []
+
+	for tid in team_to_peers:
+		var peers: Array = team_to_peers[tid].duplicate()
+		peers.shuffle()
+		resolved_team[peers[0]] = tid
+		taken_teams.append(tid)
+		for i in range(1, peers.size()):
+			reassign.append(peers[i])
+
+	var all_tids: Array = team_counts.keys()
+	for pid in reassign:
+		for tid in all_tids:
+			if tid not in taken_teams:
+				resolved_team[pid] = tid
+				taken_teams.append(tid)
+				break
+
+	# ── Resolve role conflicts (random) ──
+	var want_attack: Array = []
+	var want_defend: Array = []
+	for pid in peer_role_prefs:
+		if peer_role_prefs[pid]["role"] == ROLE_ATTACK:
 			want_attack.append(pid)
 		else:
 			want_defend.append(pid)
 
-	# Shuffle so conflict resolution is random
 	want_attack.shuffle()
 	want_defend.shuffle()
 
 	var final_attack: Array = []
-	var final_defend: Array  = []
+	var final_defend: Array = []
 	while final_attack.size() < max_per_team and want_attack.size() > 0:
 		final_attack.append(want_attack.pop_front())
 	while final_defend.size() < max_per_team and want_defend.size() > 0:
 		final_defend.append(want_defend.pop_front())
-	# Overflow: preferred role is full, assign to the other
 	for pid in want_attack:
 		if final_defend.size() < max_per_team:
 			final_defend.append(pid)
@@ -457,30 +485,45 @@ func _resolve_roles() -> void:
 
 	peer_role_prefs.clear()
 
-	# Team 1 (lowest ID) = attacker, team 2 = defender
-	var sorted_tids: Array = team_counts.keys()
-	sorted_tids.sort()
-	var attacker_tid: int = sorted_tids[0]
-	var defender_tid: int = sorted_tids[1]
+	# ── Build assignments and slot_map ──
+	var assignments: Dictionary = {}   # peer_id -> team_id
+	var slot_map:    Dictionary = {}   # team_id -> slot (0=attack, 1=defend)
 
-	var assignments: Dictionary = {}
 	for pid in final_attack:
-		assignments[pid] = attacker_tid
-	for pid in final_defend:
-		assignments[pid] = defender_tid
+		var tid: int = resolved_team.get(pid, -1)
+		if tid == -1:
+			continue
+		assignments[pid] = tid
+		slot_map[tid]    = 0
 
-	rpc_batch_assign_teams.rpc(assignments)
+	for pid in final_defend:
+		var tid: int = resolved_team.get(pid, -1)
+		if tid == -1:
+			continue
+		assignments[pid] = tid
+		slot_map[tid]    = 1
+
+	rpc_batch_assign_teams.rpc(assignments, slot_map)
+
+	# Any connected peer not in the assignments becomes an observer this round.
+	for pid in multiplayer.get_peers():
+		if pid not in assignments:
+			lobby_peers.append(pid)
+			_rpc_go_to_lobby.rpc_id(pid)
+
 	_begin_game_server()
 
-## Broadcast full peer→team assignment so every peer has consistent peer_teams state.
+## Broadcast peer→team assignments and the slot map (which team attacks/defends).
+## call_local so the server's own state is updated before _begin_game_server().
 @rpc("authority", "call_local", "reliable")
-func rpc_batch_assign_teams(assignments: Dictionary) -> void:
+func rpc_batch_assign_teams(assignments: Dictionary, slot_map: Dictionary) -> void:
 	for pid in assignments:
 		var tid: int = assignments[pid]
 		peer_teams[pid] = tid
 		team_counts[tid] = team_counts.get(tid, 0) + 1
 		if team_manager:
 			team_manager.peer_teams[pid] = tid
+	team_slot_map = slot_map
 	var my_team: int = peer_teams.get(multiplayer.get_unique_id(), -1)
 	emit_signal("team_data_updated", team_counts, my_team)
 
@@ -521,7 +564,7 @@ func _rpc_begin_game_client() -> void:
 func _start_game() -> void:
 	is_game_active = true
 	game_timer = 180.0
-	_assign_team_slots()  # runs on all peers — team_counts is already synced
+	# team_slot_map already set by rpc_batch_assign_teams on all peers
 	for tid in scores:
 		scores[tid] = 0
 	_spawn_home_zones()
@@ -668,6 +711,7 @@ func _start_next_round() -> void:
 	_end_game_pending = false
 	peer_role_prefs.clear()
 	peer_teams.clear()
+	lobby_peers.clear()
 	for tid in team_counts:
 		team_counts[tid] = 0
 	for tid in scores:

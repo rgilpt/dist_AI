@@ -96,13 +96,7 @@ The project is designed with 6 bugs introduced progressively across sessions. **
 Before touching collision, timer, or ammo logic, verify you're fixing a real bug and not an intentional one. Check the `GDD` file for the authoritative bug spec.
 
 ### Ammo Pickup Pattern (GDD reference)
-```gdscript
-# AmmoPickup.gd — Area2D body_entered signal
-func _on_area_entered(area):
-    if area.is_in_group("player"):
-        area.heal_ammo(6)  # BUG-02: intentionally set to 2 in broken version
-        queue_free()
-```
+- AmmoDrop to add ammo
 
 ### Common Student Debugging Checklist (from GDD)
 - **Player not moving?** Confirm `move_and_slide()` is in `_physics_process`, not `_process`
