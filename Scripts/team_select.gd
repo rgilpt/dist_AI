@@ -1,114 +1,91 @@
 extends Control
 
-@onready var status_lbl: Label = $Content/Status
+@onready var status_lbl:   Label          = $Content/Status
 @onready var btn_container: VBoxContainer = $Content/TeamList
 
-var my_team: int = -1
-var team_counts: Dictionary = {}
+var my_role: int = -1   # -1=not chosen, 0=attack, 1=defend
 var nm: Node = null
 
-# team_id -> Button
-var _team_buttons: Dictionary = {}
+var _attack_btn: Button = null
+var _defend_btn: Button = null
+
 
 func _ready():
-	# Wait one frame so NetworkManager is fully initialized
 	await get_tree().process_frame
-
 	nm = get_node("/root/Main/NetworkManager")
 	if nm == null:
 		printerr("TeamSelect: NetworkManager not found!")
 		return
 
-	_build_team_buttons()
+	_build_role_buttons()
 
 	nm.team_data_updated.connect(_on_team_data_updated)
 	nm.game_started.connect(_on_game_started)
 	nm.game_mode_updated.connect(update_ui)
-	nm.discovery_status.connect(_on_discovery_status)
+	nm.role_waiting.connect(_on_role_waiting)
 
 	update_ui()
 
-func _build_team_buttons() -> void:
-	# Clear any leftover children
+
+func _build_role_buttons() -> void:
 	for child in btn_container.get_children():
 		child.queue_free()
-	_team_buttons.clear()
 
-	for t in nm.team_config.get("teams", []):
-		var tid: int = t.get("team_id", -1)
-		if tid == -1:
-			continue
-		var tname: String = t.get("team_name", "Team %d" % tid)
-		var c_arr = t.get("color", null)
+	var hbox := HBoxContainer.new()
+	hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	hbox.add_theme_constant_override("separation", 24)
+	btn_container.add_child(hbox)
 
-		if _team_buttons.has(tid):
-			printerr("teams.json: duplicate team_id %d — skipping '%s'" % [tid, tname])
-			continue
-		var btn := Button.new()
-		btn.custom_minimum_size = Vector2(150, 60)
-		btn.text = tname
-		if c_arr != null:
-			btn.modulate = Color(c_arr[0], c_arr[1], c_arr[2])
-		btn.pressed.connect(func(): _on_team_btn_pressed(tid))
-		btn_container.add_child(btn)
-		_team_buttons[tid] = btn
+	_attack_btn = Button.new()
+	_attack_btn.custom_minimum_size = Vector2(160, 90)
+	_attack_btn.text = "ATTACK\nSteal the prize"
+	_attack_btn.modulate = Color(1.0, 0.55, 0.2)
+	_attack_btn.pressed.connect(func(): _on_role_btn_pressed(NetworkManager.ROLE_ATTACK))
+	hbox.add_child(_attack_btn)
 
-func _on_team_data_updated(counts: Dictionary, your_team: int) -> void:
-	team_counts = counts
-	my_team = your_team
+	_defend_btn = Button.new()
+	_defend_btn.custom_minimum_size = Vector2(160, 90)
+	_defend_btn.text = "DEFEND\nProtect the prize"
+	_defend_btn.modulate = Color(0.3, 0.7, 1.0)
+	_defend_btn.pressed.connect(func(): _on_role_btn_pressed(NetworkManager.ROLE_DEFEND))
+	hbox.add_child(_defend_btn)
+
+
+func _on_role_btn_pressed(role: int) -> void:
+	my_role = role
+	nm.rpc_claim_role.rpc(role)
 	update_ui()
 
+
+func _on_role_waiting(count: int, total: int) -> void:
+	if my_role == -1:
+		return
+	var role_name := "Attack" if my_role == NetworkManager.ROLE_ATTACK else "Defend"
+	status_lbl.text = "You chose %s!\nWaiting for others... (%d/%d ready)" % [role_name, count, total]
+	status_lbl.add_theme_color_override("font_color", Color.WHITE)
+
+
+func _on_team_data_updated(_counts: Dictionary, _your_team: int) -> void:
+	update_ui()
+
+
 func update_ui() -> void:
-	var mpt: int = nm.max_per_team if nm else 2
-	var mp: int = nm.max_players if nm else 4
-	var total: int = 0
-	for cnt in team_counts.values():
-		total += cnt
-
-	# Once 2 or more teams have at least 1 player, hide teams with nobody in them
-	var teams_active: int = 0
-	for tid in _team_buttons:
-		if team_counts.get(tid, 0) >= 1:
-			teams_active += 1
-	var lock_empty := teams_active >= 2
-
-	for tid in _team_buttons:
-		var btn: Button = _team_buttons[tid]
-		var t = nm._get_team_config(tid)
-		var tname: String = t.get("team_name", "Team %d" % tid)
-		var count: int = team_counts.get(tid, 0)
-		btn.text = "%s\n%d/%d" % [tname, count, mpt]
-		var is_full := count >= mpt
-		btn.disabled = is_full or (my_team != -1)
-		# Hide teams with no players once the match shape is decided
-		btn.visible = not (lock_empty and count == 0)
-		var c_arr = t.get("color", null)
-		if c_arr != null:
-			btn.modulate = Color(c_arr[0], c_arr[1], c_arr[2]) if not btn.disabled else Color(0.5, 0.5, 0.5)
-		else:
-			btn.modulate = Color(1, 1, 1) if not btn.disabled else Color(0.5, 0.5, 0.5)
-
-	if my_team != -1:
-		var t = nm._get_team_config(my_team)
-		var tname: String = t.get("team_name", "Team %d" % my_team)
-		var c_arr = t.get("color", null)
-		status_lbl.text = "You are on %s!\nWaiting for others... (%d/%d)" % [tname, total, mp]
-		if c_arr != null:
-			status_lbl.add_theme_color_override("font_color", Color(c_arr[0], c_arr[1], c_arr[2]))
-		else:
-			status_lbl.add_theme_color_override("font_color", Color.WHITE)
-	else:
-		status_lbl.text = "Pick your team!\nPlayers joined: %d/%d" % [total, mp]
+	if my_role == -1:
+		status_lbl.text = "Choose your role!"
 		status_lbl.add_theme_color_override("font_color", Color.WHITE)
+		if _attack_btn:
+			_attack_btn.disabled = false
+		if _defend_btn:
+			_defend_btn.disabled = false
+	else:
+		var role_name := "Attack" if my_role == NetworkManager.ROLE_ATTACK else "Defend"
+		status_lbl.text = "You chose %s!\nWaiting for others..." % role_name
+		status_lbl.add_theme_color_override("font_color", Color.WHITE)
+		if _attack_btn:
+			_attack_btn.disabled = true
+		if _defend_btn:
+			_defend_btn.disabled = true
 
-func _on_team_btn_pressed(team_id: int) -> void:
-	nm.rpc_claim_team.rpc(team_id)
-
-func _on_discovery_status(message: String) -> void:
-	status_lbl.text = message
-	status_lbl.add_theme_color_override("font_color", Color.YELLOW)
-	for btn in _team_buttons.values():
-		btn.disabled = true
 
 func _on_game_started() -> void:
 	hide()
@@ -116,6 +93,5 @@ func _on_game_started() -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_VISIBILITY_CHANGED and visible and is_node_ready():
-		# Rebuild buttons and refresh state when shown again after a reset
-		my_team = -1
+		my_role = -1
 		update_ui()
