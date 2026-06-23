@@ -47,7 +47,6 @@ func _ready():
 	p_2_zone.visible = not is_player_one
 
 	update_health_ui()
-	flag_area.body_entered.connect(_on_flag_area_body_entered)
 
 	if is_local_player:
 		await get_tree().create_timer(0.5).timeout
