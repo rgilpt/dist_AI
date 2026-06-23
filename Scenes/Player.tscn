@@ -49,6 +49,13 @@ color = Color(0.2, 0.8, 0.3, 0.3)
 visible = false
 color = Color(0.8, 0.2, 0.3, 0.3)
 
+[node name="TimerUI" type="Label" parent="." unique_id=1138871617]
+offset_left = -61.0
+offset_top = -170.0
+offset_right = 60.0
+offset_bottom = -147.0
+text = "03:00"
+
 [node name="AmmoUI" type="Label" parent="." unique_id=1138871616]
 offset_left = -61.0
 offset_top = -94.0

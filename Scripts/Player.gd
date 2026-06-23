@@ -7,6 +7,7 @@ extends CharacterBody2D
 @onready var weapon_holder : Node2D = $WeaponHolder
 @onready var flag_area : Area2D = $FlagArea
 @onready var home_zone_area : Area2D = $HomeZoneArea
+@onready var timer_ui : Label = $TimerUI
 @onready var ammo_ui : Label = $AmmoUI
 @onready var score_ui : Label = $ScoreUI
 @onready var health_ui : Label = $HealthUI
@@ -46,11 +47,23 @@ func _ready():
 	p_1_zone.visible = is_player_one
 	p_2_zone.visible = not is_player_one
 
+	# Timer label is only relevant on the local player's camera
+	timer_ui.visible = is_local_player
+
 	update_health_ui()
 
 	if is_local_player:
 		await get_tree().create_timer(0.5).timeout
 		_ready_to_sync = true
+
+
+func _process(_delta: float) -> void:
+	if not is_local_player or not timer_ui.visible:
+		return
+	var nm := get_node_or_null("/root/Main/NetworkManager")
+	if nm and nm.is_game_active:
+		var t := int(max(nm.game_timer, 0))
+		timer_ui.text = "%02d:%02d" % [t / 60, t % 60]
 
 
 func _physics_process(_delta):

@@ -134,10 +134,10 @@ func _ready():
 func _process(delta: float) -> void:
 	if not is_game_active:
 		return
-	if not multiplayer.is_server():
-		return
+	# All peers decrement locally so clients can display the countdown.
+	# Only the server actually triggers the win condition.
 	game_timer -= delta
-	if game_timer <= 0:
+	if game_timer <= 0 and multiplayer.is_server():
 		_defenders_win()
 
 func _connect_to_server(address: String) -> void:
