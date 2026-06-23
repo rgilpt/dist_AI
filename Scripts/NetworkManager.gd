@@ -12,7 +12,7 @@ var peer_teams: Dictionary = {}
 var team_slot_map: Dictionary = {}
 
 var is_game_active: bool = false
-var game_timer: float = 180.0
+var game_timer: float = 90.0
 
 var server_port: int = 7777
 var is_host: bool = false
@@ -589,7 +589,7 @@ func _rpc_begin_game_client() -> void:
 
 func _start_game() -> void:
 	is_game_active = true
-	game_timer = 180.0
+	game_timer = 90.0
 	# team_slot_map already set by rpc_batch_assign_teams on all peers
 	for tid in scores:
 		scores[tid] = 0
@@ -847,12 +847,10 @@ func rpc_reset_game_client() -> void:
 
 ## Remove all spawned in-game nodes: players, NPCs, chest, home zones.
 func _cleanup_game_entities() -> void:
-	# Players and NPCs — remove_child() first so the node disappears from the
-	# tree immediately; queue_free() then frees the memory next frame.
-	# This ensures players.get_children() / has_node() are clean right away,
-	# preventing stale nodes from appearing in new-round spawn checks.
+	# Players and NPCs — queue_free() keeps the node in the tree until end of
+	# frame so any in-flight sync_position RPCs can still be routed without an
+	# error. By the time the next round starts (12 s later) the nodes are gone.
 	for child in players.get_children():
-		players.remove_child(child)
 		child.queue_free()
 	npc_nodes.clear()
 	chest_node = null

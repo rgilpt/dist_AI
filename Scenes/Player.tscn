@@ -54,7 +54,7 @@ offset_left = -61.0
 offset_top = -170.0
 offset_right = 60.0
 offset_bottom = -147.0
-text = "03:00"
+text = "01:30"
 
 [node name="AmmoUI" type="Label" parent="." unique_id=1138871616]
 offset_left = -61.0
