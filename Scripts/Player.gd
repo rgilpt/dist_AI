@@ -32,6 +32,10 @@ var max_health: int = 100
 var health: int = 100
 var _is_dead: bool = false
 
+# Server-side speed-cheat detection
+var _last_sync_pos: Vector2 = Vector2.ZERO
+var _last_sync_time: float = -1.0
+
 func _ready():
 	add_to_group("player")
 
@@ -87,6 +91,19 @@ func _physics_process(_delta):
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
 func sync_position(pos: Vector2, flipped: bool, weapon_rot: float) -> void:
+	if multiplayer.is_server() and not _is_dead:
+		var now := Time.get_ticks_msec() / 1000.0
+		if _last_sync_time >= 0.0:
+			var dt := now - _last_sync_time
+			if dt > 0.01:
+				var implied_speed := pos.distance_to(_last_sync_pos) / dt
+				# Flag anything beyond 1.5× the max player speed (600 px/s)
+				if implied_speed > speed * 1.5:
+					var nm := get_node_or_null("/root/Main/NetworkManager")
+					if nm:
+						nm.report_suspicious(int(name), implied_speed)
+		_last_sync_time = now
+		_last_sync_pos  = pos
 	global_position = pos
 	sprite.flip_h = flipped
 	weapon_holder.rotation = weapon_rot
@@ -177,6 +194,7 @@ func rpc_sync_health(new_health: int) -> void:
 @rpc("any_peer", "call_local", "reliable")
 func rpc_die() -> void:
 	_is_dead = true
+	_last_sync_time = -1.0  # reset speed tracker — respawn teleport must not trigger cheat flag
 	visible = false
 	collider.set_deferred("disabled", true)
 	print("Player ", name, " died!")

@@ -53,3 +53,17 @@ text = "Force Start"
 [node name="ResetBtn" type="Button" parent="Panel/VBox" unique_id=412010644]
 layout_mode = 2
 text = "Reset Game"
+
+[node name="AlertsTitle" type="Label" parent="Panel/VBox"]
+layout_mode = 2
+text = "⚠ Behaviour Alerts"
+theme_override_font_sizes/font_size = 13
+modulate = Color(1, 0.6, 0.1, 1)
+visible = false
+
+[node name="Alerts" type="Label" parent="Panel/VBox"]
+layout_mode = 2
+autowrap_mode = 2
+modulate = Color(1, 0.4, 0.1, 1)
+text = ""
+visible = false

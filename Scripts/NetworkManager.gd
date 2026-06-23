@@ -37,6 +37,7 @@ signal sent_to_lobby
 signal released_from_lobby
 signal round_ended(duration: float)
 signal role_waiting(count: int, total: int)
+signal cheat_detected(peer_id: int, description: String)
 
 var _initialized: bool = false
 var player_scene = preload("res://Scenes/Player.tscn")
@@ -65,9 +66,14 @@ const LOBBY_DURATION: float = 12.0
 ## Set to false by reset_game() to cancel a pending end-game countdown.
 var _end_game_pending: bool = false
 
+## Server-side anti-cheat: per-peer violation data {count, last_report_time}.
+var _cheat_reports: Dictionary = {}
+
 ## Team assigned to slot 0 (the "attacker" — must capture the prize).
 ## Set in _start_game() once team_slot_map is known.
 var attacker_team_id: int = -1
+## Team assigned to slot 1 (the "defender" — wins if time runs out).
+var defender_team_id: int = -1
 ## All active NPC nodes, keyed by their unique string name.
 var npc_nodes: Dictionary = {}
 ## The prize chest node (exists only on server after game start).
@@ -132,7 +138,7 @@ func _process(delta: float) -> void:
 		return
 	game_timer -= delta
 	if game_timer <= 0:
-		_end_game()
+		_defenders_win()
 
 func _connect_to_server(address: String) -> void:
 	# Accept a bare IP/hostname or a full ws:// / wss:// URL.
@@ -284,7 +290,9 @@ func _on_peer_connected(id: int) -> void:
 func _on_peer_disconnected(id: int) -> void:
 	print("Peer disconnected: ", id)
 	if players.has_node(str(id)):
-		players.get_node(str(id)).queue_free()
+		var p: Node = players.get_node(str(id))
+		players.remove_child(p)
+		p.queue_free()
 	if id in peer_teams:
 		team_counts[peer_teams[id]] -= 1
 		peer_teams.erase(id)
@@ -361,6 +369,9 @@ func _is_valid_spawn(pos: Vector2, tile_map) -> bool:
 
 func _spawn_local_player() -> void:
 	var my_id := multiplayer.get_unique_id()
+	# Observers are not in peer_teams — never spawn them on the field.
+	if not peer_teams.has(my_id):
+		return
 	if players.has_node(str(my_id)):
 		print("Local player already spawned, skipping.")
 		return
@@ -382,8 +393,15 @@ func _spawn_local_player() -> void:
 func spawn_remote_player(peer_id: int, spawn_pos: Vector2 = Vector2(300, 300)) -> void:
 	if peer_id == multiplayer.get_unique_id():
 		return
-	if players.has_node(str(peer_id)):
+	# Don't create a visual copy for observer peers — they have no team.
+	if not peer_teams.has(peer_id):
 		return
+	if players.has_node(str(peer_id)):
+		# Stale node from a previous round — evict it immediately so we can
+		# spawn a fresh one below (queue_free alone would leave it in the tree).
+		var stale: Node = players.get_node(str(peer_id))
+		players.remove_child(stale)
+		stale.queue_free()
 	print("Spawning remote copy of peer: ", peer_id, " at ", spawn_pos)
 	var player = player_scene.instantiate()
 	player.name = str(peer_id)
@@ -559,10 +577,12 @@ func _begin_game_server() -> void:
 func _rpc_begin_game_client() -> void:
 	print("Client received game start")
 	emit_signal("game_started")
+	var my_id := multiplayer.get_unique_id()
+	# Observers are not in peer_teams — skip game init and spawning entirely.
+	if not peer_teams.has(my_id):
+		return
 	_start_game()
-	# Only spawn if this client actually has a team assigned
-	if peer_teams.has(multiplayer.get_unique_id()):
-		call_deferred("_spawn_local_player")
+	call_deferred("_spawn_local_player")
 
 
 # --- Game Logic ---
@@ -579,7 +599,9 @@ func _start_game() -> void:
 		for tid in team_slot_map:
 			if team_slot_map[tid] == 0:
 				attacker_team_id = tid
-		print("Attacker team: ", attacker_team_id)
+			elif team_slot_map[tid] == 1:
+				defender_team_id = tid
+		print("Attacker team: ", attacker_team_id, "  Defender team: ", defender_team_id)
 		# Spawn the prize chest at the map centre
 		_spawn_chest()
 		# Spawn 1 NPC per active team
@@ -668,8 +690,8 @@ func rpc_spawn_npc(npc_name: String, tid: int, pos: Vector2) -> void:
 		npc.apply_team_color(Color(c_arr[0], c_arr[1], c_arr[2]))
 
 
-## Called by an NPC that was carrying the prize when it died.
-## Restores the prize to the chest.
+## Called when the prize carrier dies (player or NPC).
+## Returns the prize to the chest and clears carrier state on all characters.
 func on_prize_dropped(_drop_pos: Vector2) -> void:
 	if not multiplayer.is_server():
 		return
@@ -698,6 +720,38 @@ func on_prize_scored(scoring_team: int) -> void:
 	_end_game()
 
 
+## Called by Player.sync_position() on the server when a peer's implied speed
+## exceeds 1.5× their declared max speed. Debounced to once per 2 s per peer.
+func report_suspicious(peer_id: int, speed: float) -> void:
+	if not multiplayer.is_server():
+		return
+	var now := Time.get_ticks_msec() / 1000.0
+	var entry: Dictionary = _cheat_reports.get(peer_id, {count = 0, last_report = -999.0})
+	entry.count += 1
+	_cheat_reports[peer_id] = entry
+	if now - entry.last_report < 2.0:
+		return   # suppress repeated alerts within the debounce window
+	entry.last_report = now
+	var cfg := _get_team_config(peer_teams.get(peer_id, -1))
+	var tname: String = cfg.get("team_name", "peer %d" % peer_id)
+	var desc := "[%s] speed %.0f px/s (max %.0f) — violation #%d" % [
+		tname, speed, 600.0, entry.count
+	]
+	print("⚠ ANTI-CHEAT: ", desc)
+	emit_signal("cheat_detected", peer_id, desc)
+
+
+## Called when the game timer reaches zero: defenders held the prize — they win.
+func _defenders_win() -> void:
+	if not is_game_active:
+		return
+	if defender_team_id != -1:
+		scores[defender_team_id] = scores.get(defender_team_id, 0) + 1
+		rpc_update_scores.rpc(scores)
+	print("Time's up! Defenders win — team ", defender_team_id)
+	_end_game()
+
+
 func _end_game() -> void:
 	is_game_active = false
 	_end_game_pending = true
@@ -717,9 +771,11 @@ func _start_next_round() -> void:
 	_end_game_pending = false
 	peer_role_prefs.clear()
 	peer_teams.clear()
+	_cheat_reports.clear()
 	lobby_peers.clear()
 	team_slot_map.clear()
 	attacker_team_id = -1
+	defender_team_id = -1
 	for tid in team_counts:
 		team_counts[tid] = 0
 	for tid in scores:
@@ -738,8 +794,14 @@ func rpc_end_round_client(duration: float) -> void:
 
 
 ## Sent to all clients after the lobby countdown: return to team-select.
+## Also clears stale round-1 team data so observers in the new round don't
+## pass the peer_teams.has() guard and accidentally spawn a player body.
 @rpc("authority", "call_remote", "reliable")
 func rpc_go_to_team_select_all() -> void:
+	peer_teams.clear()
+	team_slot_map.clear()
+	for tid in team_counts:
+		team_counts[tid] = 0
 	emit_signal("released_from_lobby")
 
 
@@ -773,6 +835,7 @@ func reset_game() -> void:
 	lobby_peers.clear()
 	team_slot_map.clear()
 	attacker_team_id = -1
+	defender_team_id = -1
 	rpc_update_team_counts.rpc(team_counts, -1, -1)
 
 
@@ -784,22 +847,29 @@ func rpc_reset_game_client() -> void:
 
 ## Remove all spawned in-game nodes: players, NPCs, chest, home zones.
 func _cleanup_game_entities() -> void:
-	# Players and NPCs
+	# Players and NPCs — remove_child() first so the node disappears from the
+	# tree immediately; queue_free() then frees the memory next frame.
+	# This ensures players.get_children() / has_node() are clean right away,
+	# preventing stale nodes from appearing in new-round spawn checks.
 	for child in players.get_children():
+		players.remove_child(child)
 		child.queue_free()
 	npc_nodes.clear()
 	chest_node = null
 	# Chest node in scene root
 	var chest := get_parent().get_node_or_null("PrizeChest")
 	if chest:
+		chest.get_parent().remove_child(chest)
 		chest.queue_free()
 	# Home zones
 	for child in get_parent().get_children():
 		if child.is_in_group("home_zone"):
+			child.get_parent().remove_child(child)
 			child.queue_free()
 	# Ammo drops
 	for drop in _ammo_drops.values():
 		if is_instance_valid(drop):
+			drop.get_parent().remove_child(drop)
 			drop.queue_free()
 	_ammo_drops.clear()
 
@@ -841,6 +911,10 @@ func respawn_flag(flag_team_id: int) -> void:
 	spawn_flag(flag_team_id)
 
 func drop_flag(flag_team_id: int, drop_pos: Vector2) -> void:
+	# Prize (id 0) is always returned to the chest when dropped — never left on floor.
+	if flag_team_id == 0:
+		on_prize_dropped(drop_pos)
+		return
 	flags_at_home[flag_team_id] = false
 	_create_flag_at(flag_team_id, drop_pos)
 	rpc_drop_flag.rpc(flag_team_id, drop_pos)

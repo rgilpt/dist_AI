@@ -1,12 +1,17 @@
 extends Control
 
-@onready var status_lbl: Label = $Panel/VBox/Status
-@onready var players_lbl: Label = $Panel/VBox/Players
-@onready var teams_lbl: Label = $Panel/VBox/Teams
-@onready var scores_lbl: Label = $Panel/VBox/Scores
-@onready var timer_lbl: Label = $Panel/VBox/Timer
-@onready var start_btn: Button = $Panel/VBox/StartBtn
-@onready var reset_btn: Button = $Panel/VBox/ResetBtn
+@onready var status_lbl:   Label  = $Panel/VBox/Status
+@onready var players_lbl:  Label  = $Panel/VBox/Players
+@onready var teams_lbl:    Label  = $Panel/VBox/Teams
+@onready var scores_lbl:   Label  = $Panel/VBox/Scores
+@onready var timer_lbl:    Label  = $Panel/VBox/Timer
+@onready var start_btn:    Button = $Panel/VBox/StartBtn
+@onready var reset_btn:    Button = $Panel/VBox/ResetBtn
+@onready var alerts_title: Label  = $Panel/VBox/AlertsTitle
+@onready var alerts_lbl:   Label  = $Panel/VBox/Alerts
+
+const MAX_ALERT_LINES: int = 8
+var _alert_lines: Array[String] = []
 
 var nm: Node = null
 
@@ -20,6 +25,7 @@ func _ready():
 	nm.team_data_updated.connect(_on_team_data_updated)
 	nm.game_started.connect(_on_game_started)
 	nm.game_over.connect(_on_game_over)
+	nm.cheat_detected.connect(_on_cheat_detected)
 
 	start_btn.pressed.connect(_on_start_pressed)
 	start_btn.visible = false  # only show if server wants to force start
@@ -92,6 +98,16 @@ func _on_game_over() -> void:
 	_update_status("Game Over!\n" + "  |  ".join(parts))
 	timer_lbl.visible = false
 	reset_btn.visible = true
+
+func _on_cheat_detected(_peer_id: int, description: String) -> void:
+	var mins := int(nm.game_timer) / 60
+	var secs := int(nm.game_timer) % 60
+	_alert_lines.append("[%02d:%02d] %s" % [mins, secs, description])
+	if _alert_lines.size() > MAX_ALERT_LINES:
+		_alert_lines = _alert_lines.slice(_alert_lines.size() - MAX_ALERT_LINES)
+	alerts_lbl.text = "\n".join(_alert_lines)
+	alerts_title.visible = true
+	alerts_lbl.visible = true
 
 func _update_status(text: String) -> void:
 	if status_lbl:
