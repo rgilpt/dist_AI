@@ -276,6 +276,11 @@ func _on_connected_to_server() -> void:
 
 func _on_peer_connected(id: int) -> void:
 	print("Peer connected: ", id)
+	# Defer one frame — WebSocket handshake may not be STATE_OPEN yet at this
+	# point, so sending RPCs immediately would fail with a "ready_state" error.
+	_send_welcome.bind(id).call_deferred()
+
+func _send_welcome(id: int) -> void:
 	for child in players.get_children():
 		var existing_id := int(child.name)
 		if existing_id != id:
