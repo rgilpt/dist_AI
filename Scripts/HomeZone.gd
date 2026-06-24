@@ -26,6 +26,11 @@ func _on_body_entered(body: Node2D) -> void:
 	if not is_npc and not is_player:
 		return
 
+	# Ignore bodies that are mid-death — collision shape may still be active for
+	# one physics frame while the deferred disable is pending.
+	if body.get("is_dead") == true or body.get("_is_dead") == true:
+		return
+
 	var nm: Node = get_node("/root/Main/NetworkManager")
 
 	# Determine which team this body belongs to
@@ -58,7 +63,9 @@ func _on_body_entered(body: Node2D) -> void:
 				body.rpc("rpc_set_carries_prize", false)
 			else:
 				body.rpc("rpc_set_flag", -1)
-			nm.on_prize_scored(body_team)
+			# Deferred so _cleanup_game_entities never runs inside a physics
+			# callback, which Godot forbids for CollisionObject removal.
+			nm.on_prize_scored.call_deferred(body_team)
 		return   # handled (prize path); don't fall through to CTF
 
 	# ── CTF scoring (original flag-capture rules, human players only) ──
