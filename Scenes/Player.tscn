@@ -56,6 +56,13 @@ offset_right = 60.0
 offset_bottom = -147.0
 text = "01:30"
 
+[node name="StaminaUI" type="Label" parent="." unique_id=1138871618]
+offset_left = -61.0
+offset_top = -118.0
+offset_right = 40.0
+offset_bottom = -95.0
+text = "STA: 100"
+
 [node name="AmmoUI" type="Label" parent="." unique_id=1138871616]
 offset_left = -61.0
 offset_top = -94.0

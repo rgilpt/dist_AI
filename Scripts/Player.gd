@@ -1,6 +1,16 @@
 extends CharacterBody2D
 
+## Sprint speed (Shift held). Also used as the anti-cheat speed cap reference.
 @export var speed : float = 600.0
+## Normal walking speed — slower than sprint.
+const WALK_SPEED: float = 350.0
+
+## Stamina constants
+const STAMINA_MAX:              float = 100.0
+const STAMINA_DRAIN:            float = 40.0   # per second while sprinting
+const STAMINA_REGEN_IDLE:       float = 30.0   # per second while standing still
+const STAMINA_REGEN_WALK:       float = 8.0    # per second while walking
+const STAMINA_RECOVER_THRESHOLD: float = 10.0  # must reach this after exhaustion to move again
 
 @onready var sprite : Sprite2D = $Sprite
 @onready var collider : CollisionShape2D = $CollisionShape2D
@@ -8,6 +18,7 @@ extends CharacterBody2D
 @onready var flag_area : Area2D = $FlagArea
 @onready var home_zone_area : Area2D = $HomeZoneArea
 @onready var timer_ui : Label = $TimerUI
+@onready var stamina_ui: Label = $StaminaUI
 @onready var ammo_ui : Label = $AmmoUI
 @onready var score_ui : Label = $ScoreUI
 @onready var health_ui : Label = $HealthUI
@@ -33,6 +44,9 @@ var max_health: int = 100
 var health: int = 100
 var _is_dead: bool = false
 
+var stamina: float = STAMINA_MAX
+var _exhausted: bool = false
+
 # Server-side speed-cheat detection
 var _last_sync_pos: Vector2 = Vector2.ZERO
 var _last_sync_time: float = -1.0
@@ -47,8 +61,9 @@ func _ready():
 	p_1_zone.visible = is_player_one
 	p_2_zone.visible = not is_player_one
 
-	# Timer label is only relevant on the local player's camera
-	timer_ui.visible = is_local_player
+	# HUD labels are only relevant on the local player's camera
+	timer_ui.visible   = is_local_player
+	stamina_ui.visible = is_local_player
 
 	update_health_ui()
 
@@ -66,7 +81,7 @@ func _process(_delta: float) -> void:
 		timer_ui.text = "%02d:%02d" % [t / 60, t % 60]
 
 
-func _physics_process(_delta):
+func _physics_process(delta: float):
 	if not is_local_player or _is_dead:
 		return
 
@@ -83,34 +98,60 @@ func _physics_process(_delta):
 		input_dir.x = -1
 	elif Input.is_action_pressed("p1_right"):
 		input_dir.x = 1
-	else:
-		input_dir.x = 0
-		
 	if Input.is_action_pressed("p1_up"):
 		input_dir.y = -1
 	elif Input.is_action_pressed("p1_down"):
 		input_dir.y = 1
-	else:
-		input_dir.y = 0
 	if input_dir != Vector2.ZERO:
 		input_dir = input_dir.normalized()
 
-	velocity = input_dir * speed
+	var is_moving   := input_dir != Vector2.ZERO
+	var want_sprint := Input.is_key_pressed(KEY_SHIFT) and is_moving
+	var is_sprinting := want_sprint and not _exhausted and stamina > 0.0
+
+	# ── Stamina ──────────────────────────────────────────────────────────────
+	if is_sprinting:
+		stamina -= STAMINA_DRAIN * delta
+		if stamina <= 0.0:
+			stamina = 0.0
+			_exhausted = true
+	elif is_moving:
+		stamina += STAMINA_REGEN_WALK * delta
+	else:
+		stamina += STAMINA_REGEN_IDLE * delta
+	stamina = clamp(stamina, 0.0, STAMINA_MAX)
+
+	# Lift exhaustion once enough stamina has recovered
+	if _exhausted and stamina >= STAMINA_RECOVER_THRESHOLD:
+		_exhausted = false
+
+	# ── Movement ─────────────────────────────────────────────────────────────
+	if _exhausted:
+		velocity = Vector2.ZERO
+	else:
+		var effective_speed := speed if is_sprinting else WALK_SPEED
+		velocity = input_dir * effective_speed
 	move_and_slide()
 
+	update_stamina_ui()
+
 	if _ready_to_sync:
-		sync_position.rpc(global_position, sprite.flip_h, weapon_holder.rotation)
+		sync_position.rpc(global_position, sprite.flip_h, weapon_holder.rotation, is_sprinting)
 
 @rpc("any_peer", "call_remote", "unreliable_ordered")
-func sync_position(pos: Vector2, flipped: bool, weapon_rot: float) -> void:
+func sync_position(pos: Vector2, flipped: bool, weapon_rot: float, sprinting: bool = false) -> void:
 	if multiplayer.is_server() and not _is_dead:
 		var now := Time.get_ticks_msec() / 1000.0
 		if _last_sync_time >= 0.0:
 			var dt := now - _last_sync_time
 			if dt > 0.01:
 				var implied_speed := pos.distance_to(_last_sync_pos) / dt
-				# Flag anything beyond 1.5× the max player speed (600 px/s)
-				if implied_speed > speed * 1.5:
+				# Use the appropriate cap for the reported movement state.
+				# Sprint cap = 600, walk cap = 350; allow 50% headroom for jitter.
+				# A cheater faking sprinting=true only gets the sprint ceiling (900),
+				# which is still a tighter bound than before.
+				var cap := 900.0 if sprinting else 525.0
+				if implied_speed > cap:
 					var nm := get_node_or_null("/root/Main/NetworkManager")
 					if nm:
 						nm.report_suspicious(int(name), implied_speed)
@@ -223,10 +264,13 @@ func rpc_die() -> void:
 
 func _respawn() -> void:
 	health = max_health
+	stamina = STAMINA_MAX
+	_exhausted = false
 	_is_dead = false
 	visible = true
 	collider.set_deferred("disabled", false)
 	update_health_ui()
+	update_stamina_ui()
 
 	# Teleport back to spawn position
 	if is_local_player:
@@ -236,10 +280,18 @@ func _respawn() -> void:
 			var my_team = nm.peer_teams.get(my_id, -1)
 			var spawn_pos = nm._get_spawn_position(my_team, my_id)
 			global_position = spawn_pos
-			sync_position.rpc(global_position, sprite.flip_h, weapon_holder.rotation)
+			sync_position.rpc(global_position, sprite.flip_h, weapon_holder.rotation, false)
 
 	if multiplayer.is_server():
 		rpc_sync_health.rpc(health)
+
+
+func update_stamina_ui() -> void:
+	if stamina_ui:
+		if _exhausted:
+			stamina_ui.text = "STA: TIRED!"
+		else:
+			stamina_ui.text = "STA: %d" % int(stamina)
 
 
 # --- Ammo ---
